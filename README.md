@@ -33,6 +33,23 @@ logical-invocation budgets, durable audit records, restart recovery,
 idempotency, token rotation and revocation, single-writer fencing, and explicit
 operator authority.
 
+### Why I built it
+
+This began with a practical limitation in my own work. Giving one model several
+roles could broaden a response, but it did not create genuinely independent
+judgment: each role still inherited the same model lineage, training influences,
+policies, and blind spots. I wanted distinct providers to answer independently,
+evaluate blinded alternatives, preserve disagreement, and leave an inspectable
+record.
+
+That is a single-operator origin, not a validation result. Published research
+makes heterogeneous model juries and aggregation worth testing, but also
+documents correlated errors and inconsistent gains. The current test suite
+establishes software behavior; it does not show that nine calls outperform a
+strong single model. Establishing that would require matched-cost baselines,
+protocol ablations, and evaluation across additional users and task domains.
+See [Research](docs/RESEARCH.md).
+
 ## Four-stage council
 
 1. **Propose:** OpenAI, Anthropic, Gemini, and Mistral answer independently.
