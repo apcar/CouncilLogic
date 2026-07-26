@@ -1,17 +1,17 @@
-# Model Council
+# CouncilLogic
 
 <p align="center">
-  <img src="assets/model-council-logo.png" alt="Model Council logo" width="240">
+  <img src="assets/model-council-logo.png" alt="CouncilLogic logo" width="240">
 </p>
 
 <p align="center">
-  <a href="https://github.com/apcar/model-council/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/apcar/model-council/actions/workflows/ci.yml/badge.svg"></a>
+  <a href="https://github.com/apcar/councillogic/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/apcar/councillogic/actions/workflows/ci.yml/badge.svg"></a>
   <img alt="Python 3.11+" src="https://img.shields.io/badge/python-3.11%2B-blue">
   <img alt="License: AGPL-3.0-only" src="https://img.shields.io/badge/license-AGPL--3.0--only-blue">
   <img alt="Status: public alpha" src="https://img.shields.io/badge/status-public%20alpha-orange">
 </p>
 
-Model Council is a local-first, auditable council of heterogeneous language
+CouncilLogic is a local-first, auditable council of heterogeneous language
 models. OpenAI, Anthropic, Gemini, and Mistral independently propose answers,
 judge blinded candidates, contribute to a deterministic Borda aggregate, and
 produce a final synthesis. The complete run record is stored locally.
@@ -70,8 +70,8 @@ Requires Python 3.11 or newer. Mock mode is deterministic, makes no provider
 requests, and needs no credentials.
 
 ```bash
-git clone https://github.com/apcar/model-council.git
-cd model-council
+git clone https://github.com/apcar/councillogic.git
+cd councillogic
 python3 -m venv .venv
 . .venv/bin/activate
 python -m pip install -e .
@@ -180,5 +180,5 @@ The code is licensed under the
 distribution, self-hosting, and commercial use subject to its terms. Modified
 versions offered for remote network interaction must offer Corresponding
 Source to those users as required by section 13. This summary is not legal
-advice; the license text controls. Trademark treatment for the project name
-and mark is separate from the code license.
+advice; the license text controls. Trademark treatment for the CouncilLogic
+name and mark is separate from the code license.
