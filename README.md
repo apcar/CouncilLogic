@@ -1,7 +1,7 @@
 # CouncilLogic
 
 <p align="center">
-  <img src="assets/model-council-logo.png" alt="CouncilLogic logo" width="240">
+  <img src="docs/assets/councillogic-header.svg" alt="CouncilLogic — Independent answers. One governed record." width="760">
 </p>
 
 <p align="center">
@@ -11,11 +11,14 @@
   <img alt="Status: public alpha" src="https://img.shields.io/badge/status-public%20alpha-orange">
 </p>
 
-CouncilLogic is a local-first, auditable council of heterogeneous language
-models. OpenAI, Anthropic, Gemini, Mistral, and xAI's Grok independently
-propose answers, judge blinded candidates, contribute to a deterministic Borda
-aggregate, and produce a final synthesis. The complete run record is stored
-locally.
+**Send one question across models, blind their judgments, and keep the complete
+record.**
+
+CouncilLogic is a local-first, auditable orchestration and governance layer for
+heterogeneous language-model deliberation. It sends a question to configured
+providers independently, blinds and aggregates their judgments, synthesizes the
+result, and stores the complete run record locally. It currently ships with
+adapters for OpenAI, Anthropic, Gemini, Mistral, and xAI's Grok.
 
 This repository is a **public alpha (`0.2.0a1`)**, not a production service or
 a truth oracle. Multiple models can share the same error. Verify consequential
@@ -51,12 +54,11 @@ strong single model. Establishing that would require matched-cost baselines,
 protocol ablations, and evaluation across additional users and task domains.
 See [Research](docs/RESEARCH.md).
 
-## Four-stage council
+## How CouncilLogic works
 
-1. **Propose:** OpenAI, Anthropic, Gemini, Mistral, and xAI's Grok answer
-   independently.
-2. **Judge:** each lineage ranks relabeled candidates without provider
-   attribution; structured responses are validated locally.
+1. **Propose:** every configured lineage answers independently.
+2. **Judge:** each participating lineage ranks relabeled candidates without
+   provider attribution; structured responses are validated locally.
 3. **Aggregate:** deterministic Borda scoring combines valid juries.
 4. **Synthesize:** the selected lineage receives the candidates, aggregate,
    and jury records and writes the final answer.

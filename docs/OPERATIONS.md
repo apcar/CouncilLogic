@@ -152,8 +152,8 @@ council --mock --data-dir ./work/release-gate list
 Before live use:
 
 1. Review `council.example.toml` and select the intended data directory.
-2. Configure all five credentials through the environment or a tested external
-   secret command.
+2. Configure credentials for every configured provider through the environment
+   or a tested external secret command.
 3. Run `council --config ./council.toml doctor`.
 4. Run `council --config ./council.toml providers` and verify every provider,
    model, and lineage.
@@ -356,10 +356,10 @@ be completed.
 ### Rate limiting or provider server failure
 
 The adapters perform bounded retries for explicit retryable HTTP responses such
-as `429` and selected `5xx` responses. Under the default quorum, a run may still
-complete with three healthy lineages when one provider is unavailable. Inspect
-failures and provider request IDs, wait for provider recovery, then resume
-using the same config.
+as `429` and selected `5xx` responses. Under the default five-provider topology
+and quorum, a run may still complete with three healthy lineages when up to two
+providers are unavailable. Inspect failures and provider request IDs, wait for
+provider recovery, then resume using the same config.
 
 ### Timeout or deadline exhaustion
 
@@ -459,8 +459,8 @@ intentionally written to the database.
 2. Update the process environment or external secret resolver under the same
    logical secret name.
 3. Start a new shell/process and run `doctor`.
-4. Perform a low-risk live smoke run and confirm all five providers in the
-   audit record and provider consoles. This incurs live usage.
+4. Perform a low-risk live smoke run and confirm every configured provider in
+   the audit record and provider consoles. This incurs live usage.
 5. Revoke the old key.
 6. Clear old shell environment values, terminal scrollback, and any temporary
    operator notes containing the value.

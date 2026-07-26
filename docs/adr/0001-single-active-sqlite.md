@@ -2,11 +2,11 @@
 
 - Status: Accepted for the portable-service pilot
 - Date: 2026-07-25
-- Scope: Model Council service state and reference-host failover
+- Scope: CouncilLogic service state and reference-host failover
 
 ## Context
 
-Model Council already uses a local SQLite database for durable runs,
+CouncilLogic already uses a local SQLite database for durable runs,
 invocations, events, hashes, and results. SQLite WAL mode, transactions, and
 the per-run process lock provide a strong single-host foundation. They do not
 provide distributed consensus between two independent files on two Macs.

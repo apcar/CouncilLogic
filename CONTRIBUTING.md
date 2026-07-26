@@ -1,6 +1,6 @@
 # Contributing
 
-Thank you for helping improve Model Council. This page is general information,
+Thank you for helping improve CouncilLogic. This page is general information,
 not legal advice.
 
 ## Welcome now

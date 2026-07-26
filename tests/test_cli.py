@@ -85,7 +85,7 @@ class CliTests(unittest.TestCase):
             )
             self.assertEqual(code, 0, error)
             exported = export_path.read_text(encoding="utf-8")
-            self.assertIn("# Model Council Run", exported)
+            self.assertIn("# CouncilLogic Run", exported)
             self.assertIn("## Council answer", exported)
             self.assertEqual(stat.S_IMODE(export_path.stat().st_mode), 0o600)
 

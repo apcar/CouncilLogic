@@ -9,7 +9,7 @@ from typing import Self
 try:
     import fcntl
 except ImportError as exc:  # pragma: no cover - the tomorrow beta targets macOS/Linux
-    raise RuntimeError("Model Council run locking requires a POSIX host") from exc
+    raise RuntimeError("CouncilLogic run locking requires a POSIX host") from exc
 
 
 class RunLock:

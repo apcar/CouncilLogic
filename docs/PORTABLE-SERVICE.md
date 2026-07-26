@@ -3,7 +3,7 @@
 ## Status
 
 This document describes the implemented `0.2.0a1` portable-service alpha for
-Model Council. It is a public reference deployment with deliberately narrow
+CouncilLogic. It is a public reference deployment with deliberately narrow
 boundaries:
 
 - one authenticated service on one active POSIX host;

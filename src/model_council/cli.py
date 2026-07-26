@@ -319,7 +319,7 @@ def _markdown_export(
 ) -> str:
     result = run.get("result") or {}
     lines = [
-        "# Model Council Run",
+        "# CouncilLogic Run",
         "",
         f"- Run: `{run['id']}`",
         f"- Status: `{run['status']}`",
