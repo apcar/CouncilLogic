@@ -22,14 +22,17 @@ from model_council.secrets import (  # noqa: E402
 
 
 class ConfigurationTests(unittest.TestCase):
-    def test_defaults_pin_four_current_lineages(self) -> None:
+    def test_defaults_pin_five_current_lineages(self) -> None:
         config = default_config()
 
         self.assertEqual(
             [provider.name for provider in config.providers],
-            ["openai", "anthropic", "gemini", "mistral"],
+            ["openai", "anthropic", "gemini", "mistral", "xai"],
         )
-        self.assertEqual(len({provider.lineage for provider in config.providers}), 4)
+        self.assertEqual(
+            len({provider.lineage for provider in config.providers}),
+            5,
+        )
         self.assertEqual(
             [provider.model for provider in config.providers],
             [
@@ -37,8 +40,36 @@ class ConfigurationTests(unittest.TestCase):
                 DEFAULT_MODELS["anthropic"],
                 DEFAULT_MODELS["gemini"],
                 DEFAULT_MODELS["mistral"],
+                DEFAULT_MODELS["xai"],
             ],
         )
+
+    def test_legacy_file_config_does_not_silently_enable_xai(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "config.toml"
+            path.write_text("[run]\nsynthesis_provider = \"openai\"\n")
+
+            config = load_config(path)
+
+            self.assertEqual(
+                [provider.name for provider in config.providers],
+                ["openai", "anthropic", "gemini", "mistral"],
+            )
+
+    def test_file_config_explicitly_enables_xai(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "config.toml"
+            path.write_text(
+                "[providers.xai]\nmodel = \"grok-4.5\"\n",
+                encoding="utf-8",
+            )
+
+            config = load_config(path)
+
+            self.assertEqual(
+                [provider.name for provider in config.providers],
+                ["openai", "anthropic", "gemini", "mistral", "xai"],
+            )
 
     def test_rejects_non_allowlisted_endpoint(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -46,6 +77,20 @@ class ConfigurationTests(unittest.TestCase):
             path.write_text(
                 """
 [providers.openai]
+endpoint = "https://attacker.example/v1/responses"
+""",
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(ValueError, "not allowlisted"):
+                load_config(path)
+
+    def test_rejects_non_allowlisted_xai_endpoint(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "config.toml"
+            path.write_text(
+                """
+[providers.xai]
 endpoint = "https://attacker.example/v1/responses"
 """,
                 encoding="utf-8",

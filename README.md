@@ -12,9 +12,10 @@
 </p>
 
 CouncilLogic is a local-first, auditable council of heterogeneous language
-models. OpenAI, Anthropic, Gemini, and Mistral independently propose answers,
-judge blinded candidates, contribute to a deterministic Borda aggregate, and
-produce a final synthesis. The complete run record is stored locally.
+models. OpenAI, Anthropic, Gemini, Mistral, and xAI's Grok independently
+propose answers, judge blinded candidates, contribute to a deterministic Borda
+aggregate, and produce a final synthesis. The complete run record is stored
+locally.
 
 This repository is a **public alpha (`0.2.0a1`)**, not a production service or
 a truth oracle. Multiple models can share the same error. Verify consequential
@@ -45,24 +46,26 @@ record.
 That is a single-operator origin, not a validation result. Published research
 makes heterogeneous model juries and aggregation worth testing, but also
 documents correlated errors and inconsistent gains. The current test suite
-establishes software behavior; it does not show that nine calls outperform a
+establishes software behavior; it does not show that eleven calls outperform a
 strong single model. Establishing that would require matched-cost baselines,
 protocol ablations, and evaluation across additional users and task domains.
 See [Research](docs/RESEARCH.md).
 
 ## Four-stage council
 
-1. **Propose:** OpenAI, Anthropic, Gemini, and Mistral answer independently.
+1. **Propose:** OpenAI, Anthropic, Gemini, Mistral, and xAI's Grok answer
+   independently.
 2. **Judge:** each lineage ranks relabeled candidates without provider
    attribution; structured responses are validated locally.
 3. **Aggregate:** deterministic Borda scoring combines valid juries.
 4. **Synthesize:** the selected lineage receives the candidates, aggregate,
    and jury records and writes the final answer.
 
-A normal run uses nine application-level calls: four proposals, four juries,
-and one synthesis. Successful work is persisted and reused on resume. The
-application does not give models tools, web access, code execution, or
-model-initiated actions.
+A default live run uses eleven application-level calls: five proposals, five
+juries, and one synthesis. Mock mode and the frozen `0.2.0a1` service reference
+topology remain four-lineage, nine-call fixtures. Successful work is persisted
+and reused on resume. The application does not give models tools, web access,
+code execution, or model-initiated actions.
 
 ## Five-minute credential-free quickstart
 
@@ -93,15 +96,16 @@ council --mock --data-dir ./work/demo export RUN_ID \
 
 ## Live CLI setup
 
-The live CLI sends the question and candidate text to all four configured
-providers. Review provider contracts, data handling, model availability, and
-cost controls before using sensitive material.
+The default live CLI sends the question and candidate text to all five
+configured providers. Review provider contracts, data handling, model
+availability, and cost controls before using sensitive material.
 
 ```bash
 export OPENAI_API_KEY="..."
 export ANTHROPIC_API_KEY="..."
 export GEMINI_API_KEY="..."
 export MISTRAL_API_KEY="..."
+export XAI_API_KEY="..."
 
 council doctor
 council providers

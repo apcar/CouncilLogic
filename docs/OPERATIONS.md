@@ -17,8 +17,8 @@ fencing.
 
 ## Service-alpha boundary
 
-The service runs four deterministic mock lineages corresponding to the
-four-provider topology: OpenAI, Anthropic, Gemini, and Mistral in the separate
+The service retains the four deterministic mock lineages from its frozen
+`0.2.0a1` reference topology. It does not mirror the separate five-provider
 live CLI. It has six fixed principals; both work identities remain disabled.
 Enabled principals have durable mandates for `run:create`, `run:read`, and
 `provider:invoke`. Run reads and idempotency are owner-scoped.
@@ -152,7 +152,7 @@ council --mock --data-dir ./work/release-gate list
 Before live use:
 
 1. Review `council.example.toml` and select the intended data directory.
-2. Configure all four credentials through the environment or a tested external
+2. Configure all five credentials through the environment or a tested external
    secret command.
 3. Run `council --config ./council.toml doctor`.
 4. Run `council --config ./council.toml providers` and verify every provider,
@@ -213,9 +213,10 @@ Treat each idempotency key as permanent within a database. Reusing it with a
 different locked request fails. Use a key that contains no secret or personal
 data.
 
-The default four-provider path has nine application-level provider calls:
-four proposals, four juries, and one synthesis. Proposal and jury stages run in
-parallel. Successful stage/provider slots are reused on resume.
+The default five-provider live path has eleven application-level provider
+calls: five proposals, five juries, and one synthesis. Proposal and jury stages
+run in parallel. Successful stage/provider slots are reused on resume. The
+mock-only service remains a four-lineage, nine-call fixture.
 
 ## Policy controls
 
@@ -335,9 +336,9 @@ provider calls.
 
 Run `doctor`. Confirm that the exact logical names are available:
 `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`, and
-`MISTRAL_API_KEY`, unless the TOML uses different `secret_name` values. For an
-external resolver, invoke it manually with a logical name and check only the
-exit status; do not paste or record its output.
+`MISTRAL_API_KEY`, and `XAI_API_KEY`, unless the TOML uses different
+`secret_name` values. For an external resolver, invoke it manually with a
+logical name and check only the exit status; do not paste or record its output.
 
 ### Authentication or permission failure
 
@@ -458,7 +459,7 @@ intentionally written to the database.
 2. Update the process environment or external secret resolver under the same
    logical secret name.
 3. Start a new shell/process and run `doctor`.
-4. Perform a low-risk live smoke run and confirm all four providers in the
+4. Perform a low-risk live smoke run and confirm all five providers in the
    audit record and provider consoles. This incurs live usage.
 5. Revoke the old key.
 6. Clear old shell environment values, terminal scrollback, and any temporary

@@ -96,6 +96,7 @@ class CliTests(unittest.TestCase):
                 "ANTHROPIC_API_KEY",
                 "GEMINI_API_KEY",
                 "MISTRAL_API_KEY",
+                "XAI_API_KEY",
             )
             import os
 

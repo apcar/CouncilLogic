@@ -30,6 +30,7 @@ from model_council.providers.http import (  # noqa: E402
 from model_council.providers.mistral import MistralProvider  # noqa: E402
 from model_council.providers.mock import MockProvider  # noqa: E402
 from model_council.providers.openai import OpenAIProvider  # noqa: E402
+from model_council.providers.xai import XAIProvider  # noqa: E402
 
 
 def config(name: str, endpoint: str, model: str = "test-model") -> ProviderConfig:
@@ -154,6 +155,68 @@ class ParsingTests(unittest.TestCase):
         self.assertFalse(
             body["text"]["format"]["schema"]["additionalProperties"]
         )
+
+    def test_xai_grok_responses_payload_parsing_and_metadata(self) -> None:
+        transport = SequenceTransport(
+            response(
+                200,
+                {
+                    "id": "resp_grok",
+                    "model": "grok-4.5",
+                    "status": "completed",
+                    "output": [
+                        {
+                            "type": "message",
+                            "content": [
+                                {"type": "output_text", "text": "Grok answer"}
+                            ],
+                        }
+                    ],
+                    "usage": {
+                        "input_tokens": 12,
+                        "output_tokens": 5,
+                        "total_tokens": 17,
+                        "cost_in_usd_ticks": 123456,
+                    },
+                },
+                {
+                    "x-request-id": "req_xai",
+                    "x-zero-data-retention": "true",
+                },
+            )
+        )
+        provider = XAIProvider(
+            config(
+                "xai",
+                "https://api.x.ai/v1/responses",
+                "grok-4.5",
+            ),
+            "xai-secret",
+            client=client(transport),
+        )
+
+        parsed = provider.generate(
+            system_prompt="system",
+            user_prompt="question",
+            stage="jury",
+        )
+
+        self.assertEqual(parsed.content, "Grok answer")
+        self.assertEqual(parsed.request_id, "req_xai")
+        self.assertEqual(parsed.resolved_model, "grok-4.5")
+        self.assertEqual(parsed.usage.total_tokens, 17)
+        self.assertEqual(parsed.metadata["cost_in_usd_ticks"], 123456)
+        self.assertTrue(parsed.metadata["zero_data_retention"])
+        body = json.loads(transport.requests[0].data or b"{}")
+        self.assertEqual(body["model"], "grok-4.5")
+        self.assertEqual(body["reasoning"], {"effort": "low"})
+        self.assertEqual(body["text"]["format"]["type"], "json_schema")
+        self.assertNotIn("xai-secret", json.dumps(body))
+        self.assertEqual(
+            transport.requests[0].get_header("Authorization"),
+            "Bearer xai-secret",
+        )
+        self.assertNotIn("xai-secret", json.dumps(parsed.to_dict()))
 
     def test_anthropic_messages_parsing(self) -> None:
         transport = SequenceTransport(
@@ -512,6 +575,14 @@ class FactoryAndMockTests(unittest.TestCase):
             ),
             "secret",
         )
+        xai = create_provider(
+            config(
+                "xai",
+                "https://api.x.ai/v1/responses",
+                "grok-4.5",
+            ),
+            "secret",
+        )
         mock = create_provider(
             ProviderConfig(
                 name="mock-2",
@@ -525,6 +596,7 @@ class FactoryAndMockTests(unittest.TestCase):
 
         self.assertIsInstance(openai, OpenAIProvider)
         self.assertIsInstance(mistral, MistralProvider)
+        self.assertIsInstance(xai, XAIProvider)
         self.assertIsInstance(mock, MockProvider)
 
     def test_mock_is_deterministic_and_emits_valid_jury_json(self) -> None:
