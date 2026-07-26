@@ -1,0 +1,39 @@
+[run]
+# Override with MODEL_COUNCIL_DATA_DIR when preferred.
+data_dir = "~/.local/share/model-council"
+synthesis_provider = "openai"
+
+[policy]
+proposal_quorum = 3
+jury_quorum = 3
+min_lineages = 3
+max_calls = 12
+deadline_seconds = 420
+allow_partial = true
+
+[providers.openai]
+model = "gpt-5.6-sol"
+secret_name = "OPENAI_API_KEY"
+max_output_tokens = 1800
+timeout_seconds = 90
+max_attempts = 3
+[providers.anthropic]
+model = "claude-sonnet-4-6"
+secret_name = "ANTHROPIC_API_KEY"
+max_output_tokens = 1800
+timeout_seconds = 90
+max_attempts = 3
+
+[providers.gemini]
+model = "gemini-3.6-flash"
+secret_name = "GEMINI_API_KEY"
+max_output_tokens = 1800
+timeout_seconds = 90
+max_attempts = 3
+
+[providers.mistral]
+model = "mistral-medium-3-5"
+secret_name = "MISTRAL_API_KEY"
+max_output_tokens = 1800
+timeout_seconds = 90
+max_attempts = 3

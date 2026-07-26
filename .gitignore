@@ -1,0 +1,47 @@
+# Local configuration and credentials
+council.toml
+.env
+.env.*
+!.env.example
+*.token
+*.tokens
+token
+tokens/
+secrets.*
+!src/model_council/secrets.py
+
+# Private and generated working data
+work/
+private/
+private-data/
+private-exports/
+data/
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+
+# Python, coverage, build, and tool caches
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+dist/
+build/
+*.egg-info/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.tox/
+.nox/
+.cache/
+
+# Platform and editor files
+.DS_Store
+*.swp
+*~

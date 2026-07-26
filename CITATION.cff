@@ -1,0 +1,12 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it using the metadata below."
+title: "Model Council"
+type: software
+authors:
+  - family-names: "Greene"
+    given-names: "Andrew"
+version: 0.2.0a1
+date-released: 2026-07-26
+url: "https://github.com/apcar/model-council"
+repository-code: "https://github.com/apcar/model-council"
+license: AGPL-3.0-only

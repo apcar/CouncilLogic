@@ -1,0 +1,42 @@
+name: Design proposal
+description: Discuss governance, architecture, research, or documented behavior
+title: "[Design]: "
+labels: ["design"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Discussion is welcome. Do not attach code or other copyrightable
+        contributions while the contribution gate is closed.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem or question
+      description: Describe the operator need, failure mode, or research question.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed direction
+      description: Keep this conceptual; do not submit implementation code.
+    validations:
+      required: true
+  - type: textarea
+    id: boundaries
+    attributes:
+      label: Governance and security boundaries
+      description: Note effects on identity, mandates, budgets, recovery, or operator authority.
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: References or evaluation evidence
+  - type: checkboxes
+    id: terms
+    attributes:
+      label: Contribution gate
+      options:
+        - label: I understand that unsolicited pull requests and copyrightable contributions are closed.
+          required: true

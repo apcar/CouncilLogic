@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "model-council"
+version = "0.2.0a1"
+description = "A local-first, auditable council of heterogeneous language models."
+readme = "README.md"
+requires-python = ">=3.11"
+license = "AGPL-3.0-only"
+authors = [{ name = "Andrew Greene" }]
+dependencies = []
+
+[project.scripts]
+council = "model_council.cli:main"
+council-remote = "model_council.remote:main"
+council-service = "model_council.service:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
