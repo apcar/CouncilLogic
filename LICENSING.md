@@ -1,6 +1,6 @@
 # Licensing
 
-Model Council is licensed under the GNU Affero General Public License
+CouncilLogic is licensed under the GNU Affero General Public License
 version 3 only, using the exact SPDX identifier `AGPL-3.0-only`. The complete
 license text is in [LICENSE](LICENSE).
 

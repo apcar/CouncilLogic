@@ -1,6 +1,6 @@
 # Support
 
-Model Council is a public alpha maintained on a best-effort basis. There is no
+CouncilLogic is a public alpha maintained on a best-effort basis. There is no
 service-level agreement, guaranteed response time, or production support.
 
 - Read the [README](README.md), [operations runbook](docs/OPERATIONS.md), and

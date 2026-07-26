@@ -2,7 +2,7 @@
 
 ## Public-alpha posture
 
-Model Council `0.2.0a1` adds a hardened, governed service alpha to the
+CouncilLogic `0.2.0a1` adds a hardened, governed service alpha to the
 single-user local CLI. The service is mock-only, loopback-only, and must not be
 exposed as a public network daemon. It has application-level multi-principal
 controls, but it is not a production identity, billing, or Internet-facing
@@ -331,7 +331,7 @@ If the database or an export may have been disclosed:
 ## Reporting a security issue
 
 Use GitHub's **privately report a security vulnerability** feature for
-`apcar/model-council`. Do not open a public issue containing secrets, sensitive
+`apcar/CouncilLogic`. Do not open a public issue containing secrets, sensitive
 prompts, raw provider responses, exploit details, or identifying data.
 
 Include a concise description, affected version, reproduction conditions,

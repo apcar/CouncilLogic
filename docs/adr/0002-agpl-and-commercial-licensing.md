@@ -5,7 +5,7 @@
 
 ## Context
 
-Model Council is a portable, governed council control plane. The licensing
+CouncilLogic is a portable, governed council control plane. The licensing
 choice should preserve software freedom for users of modified network-served
 versions while leaving room for separately negotiated proprietary use where
 the copyright holder has sufficient rights.

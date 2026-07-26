@@ -239,7 +239,7 @@ class RemoteCouncilClient:
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="council-remote",
-        description="Submit work to a governed Model Council service.",
+        description="Submit work to a governed CouncilLogic service.",
     )
     parser.add_argument("--server", required=True, help="Council service base URL")
     parser.add_argument(

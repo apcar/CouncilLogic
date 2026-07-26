@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512" role="img" aria-labelledby="title desc">
+  <title id="title">CouncilLogic mark</title>
+  <desc id="desc">A governed chamber, continuous deliberation path, synthesis opening, and durable central record.</desc>
+  <defs>
+    <linearGradient id="background" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#071426"/>
+      <stop offset="0.58" stop-color="#12334A"/>
+      <stop offset="1" stop-color="#155E63"/>
+    </linearGradient>
+    <linearGradient id="flow" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#2DD4BF"/>
+      <stop offset="1" stop-color="#14B8A6"/>
+    </linearGradient>
+  </defs>
+  <rect width="512" height="512" rx="104" fill="url(#background)"/>
+  <path d="M364 116C301 61 204 63 142 123C71 192 73 309 144 379C206 439 302 439 366 387"
+        fill="none" stroke="#F8FAFC" stroke-width="56" stroke-linecap="round"/>
+  <path d="M351 180C307 143 240 140 193 183C150 222 152 285 193 324C236 364 304 360 351 320"
+        fill="none" stroke="url(#flow)" stroke-width="28" stroke-linecap="round"/>
+  <path d="M351 223L433 256L351 289"
+        fill="none" stroke="#2DD4BF" stroke-width="28" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M256 201L311 256L256 311L201 256Z" fill="#F59E0B"/>
+  <path d="M256 228L284 256L256 284L228 256Z" fill="#0B2447"/>
+</svg>

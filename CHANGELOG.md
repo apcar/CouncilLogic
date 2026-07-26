@@ -12,6 +12,9 @@ All notable public changes to CouncilLogic are recorded here.
 
 ### Changed
 
+- Replaced the fixed-member square logo with a provider-count-neutral
+  CouncilLogic mark and PageParcel-sized README header, and made the public
+  product framing independent of the current provider roster.
 - The default live council now uses five proposals, five juries, and one
   synthesis. Existing file-backed four-provider configurations remain
   four-provider until they add an explicit `[providers.xai]` section.
