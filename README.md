@@ -5,7 +5,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/apcar/councillogic/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/apcar/councillogic/actions/workflows/ci.yml/badge.svg"></a>
+  <a href="https://github.com/apcar/CouncilLogic/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/apcar/CouncilLogic/actions/workflows/ci.yml/badge.svg"></a>
   <img alt="Python 3.11+" src="https://img.shields.io/badge/python-3.11%2B-blue">
   <img alt="License: AGPL-3.0-only" src="https://img.shields.io/badge/license-AGPL--3.0--only-blue">
   <img alt="Status: public alpha" src="https://img.shields.io/badge/status-public%20alpha-orange">
@@ -70,8 +70,8 @@ Requires Python 3.11 or newer. Mock mode is deterministic, makes no provider
 requests, and needs no credentials.
 
 ```bash
-git clone https://github.com/apcar/councillogic.git
-cd councillogic
+git clone https://github.com/apcar/CouncilLogic.git
+cd CouncilLogic
 python3 -m venv .venv
 . .venv/bin/activate
 python -m pip install -e .
