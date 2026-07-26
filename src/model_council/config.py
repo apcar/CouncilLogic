@@ -19,6 +19,7 @@ DEFAULT_ENDPOINTS = {
         "v1beta/models/{model}:generateContent"
     ),
     "mistral": "https://api.mistral.ai/v1/chat/completions",
+    "xai": "https://api.x.ai/v1/responses",
 }
 
 DEFAULT_MODELS = {
@@ -26,6 +27,7 @@ DEFAULT_MODELS = {
     "anthropic": "claude-sonnet-4-6",
     "gemini": "gemini-3.6-flash",
     "mistral": "mistral-medium-3-5",
+    "xai": "grok-4.5",
 }
 
 DEFAULT_SECRETS = {
@@ -33,6 +35,7 @@ DEFAULT_SECRETS = {
     "anthropic": "ANTHROPIC_API_KEY",
     "gemini": "GEMINI_API_KEY",
     "mistral": "MISTRAL_API_KEY",
+    "xai": "XAI_API_KEY",
 }
 
 DEFAULT_LINEAGES = {
@@ -40,6 +43,7 @@ DEFAULT_LINEAGES = {
     "anthropic": "anthropic-claude",
     "gemini": "google-gemini",
     "mistral": "mistral",
+    "xai": "xai-grok",
 }
 
 ALLOWED_ENDPOINT_HOSTS = {
@@ -47,9 +51,11 @@ ALLOWED_ENDPOINT_HOSTS = {
     "anthropic": {"api.anthropic.com"},
     "gemini": {"generativelanguage.googleapis.com"},
     "mistral": {"api.mistral.ai"},
+    "xai": {"api.x.ai"},
     "mock": {"localhost", "127.0.0.1"},
 }
 
+_PROVIDERS_ADDED_AFTER_V0_2 = frozenset({"xai"})
 _SECRET_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
@@ -83,7 +89,7 @@ def default_config() -> AppConfig:
     return AppConfig(
         providers=tuple(
             _default_provider(name)
-            for name in ("openai", "anthropic", "gemini", "mistral")
+            for name in ("openai", "anthropic", "gemini", "mistral", "xai")
         ),
         policy=RunPolicy(),
         synthesis_provider="openai",
@@ -172,6 +178,11 @@ def load_config(path: str | Path | None = None) -> AppConfig:
     providers: list[ProviderConfig] = []
     defaults = {provider.name: provider for provider in base.providers}
     for name, default in defaults.items():
+        # A file-backed configuration written before a provider was added must
+        # not silently acquire another credential requirement or billable
+        # participant. New configurations opt in by including its section.
+        if name in _PROVIDERS_ADDED_AFTER_V0_2 and name not in provider_raw:
+            continue
         override: dict[str, Any] = dict(provider_raw.get(name) or {})
         provider = ProviderConfig(
             name=name,

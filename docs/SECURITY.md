@@ -9,19 +9,19 @@ controls, but it is not a production identity, billing, or Internet-facing
 system. Live service, Cloudflare or another remote front door, work use, and
 commercial use remain gated.
 
-The four-provider CLI is a separate surface. Local tests and prior live checks
+The five-provider CLI is a separate surface. Local tests and prior live checks
 do not remove the alpha boundaries below, establish current provider health,
 or authorize service deployment.
 
 Before using sensitive material, decide whether sending that material to all
-four providers is permitted under the applicable contracts, account settings,
+five providers is permitted under the applicable contracts, account settings,
 data residency requirements, and law.
 
 ## Assets and trust boundaries
 
 The principal assets are:
 
-- OpenAI, Anthropic, Gemini, and Mistral API credentials.
+- OpenAI, Anthropic, Gemini, Mistral, and xAI API credentials.
 - Questions and contextual information supplied by the operator.
 - Provider prompts and raw responses.
 - Jury records, aggregate rankings, and synthesized answers.
@@ -48,8 +48,8 @@ The trust boundaries are:
 ### Mock-only loopback service
 
 The `0.2.0a1` service accepts only loopback bind addresses and constructs four
-deterministic mock lineages corresponding to the Council's four-provider
-topology (OpenAI, Anthropic, Gemini, and Mistral in the separate live CLI).
+deterministic mock lineages. This frozen reference fixture does not mirror the
+five-provider live CLI.
 Startup rejects a store containing any live-mode run. This is a fail-closed
 separation from the live CLI, not permission to add a tunnel.
 
@@ -166,6 +166,7 @@ api.openai.com
 api.anthropic.com
 generativelanguage.googleapis.com
 api.mistral.ai
+api.x.ai
 ```
 
 Embedded URL credentials and non-allowlisted hosts are rejected. This reduces
@@ -195,7 +196,7 @@ are treated as invalid judgments rather than trusted records.
 
 ### Diversity and blinded evaluation
 
-The default configuration uses four separately named lineages. Candidate
+The default live configuration uses five separately named lineages. Candidate
 provider names are replaced by shuffled labels for jury prompts, and aggregate
 input is anonymized for synthesis.
 
@@ -239,7 +240,7 @@ request metadata, and configured secret *names*. It is plaintext.
 Do not submit:
 
 - API keys, passwords, recovery codes, private keys, or session tokens.
-- Material whose disclosure to all four providers is prohibited.
+- Material whose disclosure to all five providers is prohibited.
 - Personal or regulated data that has not passed the relevant review.
 - Unredacted production incidents when a minimum reproduction will do.
 

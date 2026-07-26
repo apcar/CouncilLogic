@@ -65,7 +65,7 @@ Related protocol families remain useful comparison targets:
    mixture-of-agents protocol needs a distinct version and matched-cost
    evaluation before becoming a default.
 
-## Interpreting the fourth lineage
+## Interpreting additional lineages
 
 The public alpha adds Mistral to the OpenAI, Anthropic, and Gemini baseline. This
 broadens vendor and model-family heterogeneity and permits a three-of-four
@@ -73,12 +73,16 @@ default quorum to tolerate one unavailable lineage. It does not establish
 statistical independence, eliminate shared training-data effects, or prove that
 four providers outperform a three-provider configuration.
 
-Treat the fourth lineage as an engineering hypothesis. Compare three- and
-four-lineage configurations on a fixed, blinded evaluation set; report
+The current live configuration adds xAI's Grok as a fifth lineage. That further
+broadens provider and model-family coverage and gives a three-of-five quorum
+tolerance for two unavailable lineages. It does not prove that five providers
+outperform four.
+
+Treat each added lineage as an engineering hypothesis. Compare three-, four-,
+and five-lineage configurations on a fixed, blinded evaluation set; report
 accuracy, valid-jury rate, abstentions, ties, latency, and total provider cost;
-and keep the evidence separate. Mistral API compatibility and a passing live
-canary are useful
-release checks, not research evidence that the council is correct.
+and keep the evidence separate. API compatibility and passing live canaries
+are useful release checks, not research evidence that the council is correct.
 
 ## Useful research and evaluation kits
 

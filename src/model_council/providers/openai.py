@@ -33,6 +33,8 @@ def _finish_reason(value: str | None) -> str | None:
 
 
 class OpenAIProvider(Provider):
+    provider_label = "OpenAI"
+
     def __init__(
         self,
         config: ProviderConfig,
@@ -126,7 +128,7 @@ class OpenAIProvider(Provider):
                 else ErrorCategory.INVALID_RESPONSE
             )
             raise ProviderError(
-                "OpenAI response did not contain generated text",
+                f"{self.provider_label} response did not contain generated text",
                 category=category,
                 retryable=False,
                 status_code=result.status_code,

@@ -8,6 +8,7 @@ from .gemini import GeminiProvider
 from .mistral import MistralProvider
 from .mock import MockProvider
 from .openai import OpenAIProvider
+from .xai import XAIProvider
 
 
 def create_provider(
@@ -21,6 +22,7 @@ def create_provider(
         "anthropic": AnthropicProvider,
         "gemini": GeminiProvider,
         "mistral": MistralProvider,
+        "xai": XAIProvider,
     }
     provider_type = providers.get(config.name)
     if provider_type is None:

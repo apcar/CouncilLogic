@@ -1,6 +1,22 @@
 # Changelog
 
-All notable public changes to Model Council are recorded here.
+All notable public changes to CouncilLogic are recorded here.
+
+## Unreleased
+
+### Added
+
+- xAI's Grok 4.5 as a fifth live CLI provider, using the Responses API,
+  structured jury output, official-host restriction, external-only
+  `XAI_API_KEY` resolution, and provider-reported cost metadata.
+
+### Changed
+
+- The default live council now uses five proposals, five juries, and one
+  synthesis. Existing file-backed four-provider configurations remain
+  four-provider until they add an explicit `[providers.xai]` section.
+- The mock-only `0.2.0a1` service remains frozen at four deterministic
+  lineages and nine logical calls.
 
 ## [0.2.0a1] - 2026-07-26
 
@@ -32,4 +48,4 @@ Initial public alpha.
 - External pull requests and copyrightable contributions remain closed until
   a counsel-reviewed contributor license agreement is available.
 
-[0.2.0a1]: https://github.com/apcar/model-council/releases/tag/v0.2.0a1
+[0.2.0a1]: https://github.com/apcar/CouncilLogic/releases/tag/v0.2.0a1

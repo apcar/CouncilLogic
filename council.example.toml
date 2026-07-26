@@ -37,3 +37,10 @@ secret_name = "MISTRAL_API_KEY"
 max_output_tokens = 1800
 timeout_seconds = 90
 max_attempts = 3
+
+[providers.xai]
+model = "grok-4.5"
+secret_name = "XAI_API_KEY"
+max_output_tokens = 1800
+timeout_seconds = 90
+max_attempts = 3
