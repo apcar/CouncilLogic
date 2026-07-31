@@ -20,6 +20,7 @@ from model_council.models import (  # noqa: E402
     ProviderError,
 )
 from model_council.providers.anthropic import AnthropicProvider  # noqa: E402
+from model_council.providers.cohere import CohereProvider  # noqa: E402
 from model_council.providers.factory import create_provider  # noqa: E402
 from model_council.providers.gemini import GeminiProvider  # noqa: E402
 from model_council.providers.http import (  # noqa: E402
@@ -30,6 +31,8 @@ from model_council.providers.http import (  # noqa: E402
 from model_council.providers.mistral import MistralProvider  # noqa: E402
 from model_council.providers.mock import MockProvider  # noqa: E402
 from model_council.providers.openai import OpenAIProvider  # noqa: E402
+from model_council.providers.qwen import QwenProvider  # noqa: E402
+from model_council.providers.upstage import UpstageProvider  # noqa: E402
 from model_council.providers.xai import XAIProvider  # noqa: E402
 from model_council.protocol import structured_output_schema  # noqa: E402
 
@@ -909,6 +912,33 @@ class FactoryAndMockTests(unittest.TestCase):
             ),
             "secret",
         )
+        qwen = create_provider(
+            config(
+                "qwen",
+                (
+                    "https://dashscope-us.aliyuncs.com/"
+                    "compatible-mode/v1/chat/completions"
+                ),
+                "qwen3.7-max",
+            ),
+            "secret",
+        )
+        cohere = create_provider(
+            config(
+                "cohere",
+                "https://api.cohere.ai/v2/chat",
+                "command-a-plus-05-2026",
+            ),
+            "secret",
+        )
+        upstage = create_provider(
+            config(
+                "upstage",
+                "https://api.upstage.ai/v1/chat/completions",
+                "solar-pro3-260323",
+            ),
+            "secret",
+        )
         mock = create_provider(
             ProviderConfig(
                 name="mock-2",
@@ -923,6 +953,9 @@ class FactoryAndMockTests(unittest.TestCase):
         self.assertIsInstance(openai, OpenAIProvider)
         self.assertIsInstance(mistral, MistralProvider)
         self.assertIsInstance(xai, XAIProvider)
+        self.assertIsInstance(qwen, QwenProvider)
+        self.assertIsInstance(cohere, CohereProvider)
+        self.assertIsInstance(upstage, UpstageProvider)
         self.assertIsInstance(mock, MockProvider)
 
     def test_mock_is_deterministic_and_emits_valid_jury_json(self) -> None:

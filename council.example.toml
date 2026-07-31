@@ -7,7 +7,7 @@ synthesis_provider = "openai"
 proposal_quorum = 3
 jury_quorum = 3
 min_lineages = 3
-max_calls = 16
+max_calls = 20
 deadline_seconds = 480
 allow_partial = true
 max_question_chars = 30000
@@ -60,3 +60,36 @@ timeout_seconds = 90
 max_attempts = 3
 stage_max_output_tokens = { proposal = 3200, jury = 2200, synthesis = 3200 }
 stage_timeout_seconds = { proposal = 150, jury = 120, synthesis = 180 }
+
+[providers.qwen]
+model = "qwen3.7-max"
+secret_name = "DASHSCOPE_API_KEY"
+max_output_tokens = 1800
+timeout_seconds = 90
+max_attempts = 3
+stage_max_output_tokens = { proposal = 3200, jury = 2200, synthesis = 3200 }
+stage_timeout_seconds = { proposal = 150, jury = 120, synthesis = 180 }
+extra = { enable_thinking = false }
+
+[providers.cohere]
+model = "command-a-plus-05-2026"
+secret_name = "COHERE_API_KEY"
+max_output_tokens = 1800
+timeout_seconds = 90
+max_attempts = 3
+stage_max_output_tokens = { proposal = 3200, jury = 2200, synthesis = 3200 }
+stage_timeout_seconds = { proposal = 150, jury = 120, synthesis = 180 }
+extra = { thinking = { token_budget = 800 } }
+
+# Optional bench provider. It is supported but deliberately excluded from the
+# default seven-member council until its credential and live canary are ready.
+[providers.upstage]
+enabled = false
+model = "solar-pro3-260323"
+secret_name = "UPSTAGE_API_KEY"
+max_output_tokens = 1800
+timeout_seconds = 90
+max_attempts = 3
+stage_max_output_tokens = { proposal = 3200, jury = 2200, synthesis = 3200 }
+stage_timeout_seconds = { proposal = 150, jury = 120, synthesis = 180 }
+extra = { reasoning_effort = "low" }

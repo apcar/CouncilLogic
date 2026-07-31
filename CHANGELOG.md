@@ -9,6 +9,13 @@ All notable public changes to CouncilLogic are recorded here.
 - xAI's Grok 4.5 as a fifth live CLI provider, using the Responses API,
   structured jury output, official-host restriction, external-only
   `XAI_API_KEY` resolution, and provider-reported cost metadata.
+- Alibaba Qwen 3.7 Max and Cohere Command A+ as the sixth and seventh default
+  live CLI providers, with bounded reasoning, official-host restrictions,
+  external-only credential resolution, provider-specific structured-output
+  handling, and strict local artifact validation.
+- An optional, disabled Upstage Solar Pro 3 bench adapter. It is registered for
+  explicit file-backed use but remains outside the default council pending a
+  credential and live structured-output canary.
 - A deterministic workload preflight that bounds question size and projected
   proposal, jury, and synthesis prompt growth before any provider call.
 - Stage-specific provider output-token and request-timeout budgets, one
@@ -45,17 +52,19 @@ All notable public changes to CouncilLogic are recorded here.
 - Proposal responses are locally validated, size-bounded JSON artifacts.
   Juries consume those artifacts, and synthesis consumes bounded candidates
   plus compact vote records instead of every jury rationale.
-- The default call budget is 16, leaving room for the normal eleven-call live
-  topology plus at most one truncation recovery per participant slot; the
-  default cooperative deadline is 480 seconds.
+- The no-config live and example-config call budget is 20, leaving five
+  recovery slots above the normal fifteen-call seven-provider topology. Legacy
+  file-backed configurations retain the prior 16-call default unless they opt
+  into a higher ceiling; the default cooperative deadline remains 480 seconds.
 - Gemini uses low thinking by default and a 4,096-token stage budget so hidden
   thinking is less likely to consume the visible artifact budget.
 - Replaced the fixed-member square logo with a provider-count-neutral
   CouncilLogic mark and PageParcel-sized README header, and made the public
   product framing independent of the current provider roster.
-- The default live council now uses five proposals, five juries, and one
-  synthesis. Existing file-backed four-provider configurations remain
-  four-provider until they add an explicit `[providers.xai]` section.
+- The default live council now uses seven proposals, seven juries, and one
+  synthesis. Existing file-backed configurations do not silently acquire xAI,
+  Qwen, Cohere, or Upstage; each post-`0.2.0a1` provider requires an explicit
+  section, and Upstage must additionally be enabled.
 - The mock-only `0.2.0a1` service remains frozen at four deterministic
   lineages and nine logical calls.
 

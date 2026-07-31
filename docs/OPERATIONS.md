@@ -18,7 +18,7 @@ fencing.
 ## Service-alpha boundary
 
 The service retains the four deterministic mock lineages from its frozen
-`0.2.0a1` reference topology. It does not mirror the separate five-provider
+`0.2.0a1` reference topology. It does not mirror the separate seven-provider
 live CLI. It has six fixed principals; both work identities remain disabled.
 Enabled principals have durable mandates for `run:create`, `run:read`, and
 `provider:invoke`. Run reads and idempotency are owner-scoped.
@@ -213,12 +213,12 @@ Treat each idempotency key as permanent within a database. Reusing it with a
 different locked request fails. Use a key that contains no secret or personal
 data.
 
-The default five-provider live path has eleven application-level provider
-calls: five proposals, five juries, and one synthesis. Proposal and jury stages
-run in parallel. The default 16-call ceiling leaves five recovery slots, but a
-normal clean run still makes eleven calls. Successful stage/provider slots are
-reused on resume. The mock-only service remains a four-lineage, nine-call
-fixture.
+The default seven-provider live path has fifteen application-level provider
+calls: seven proposals, seven juries, and one synthesis. Proposal and jury
+stages run in parallel. The default 20-call ceiling leaves five recovery slots,
+but a normal clean run still makes fifteen calls. Successful stage/provider
+slots are reused on resume. The mock-only service remains a four-lineage,
+nine-call fixture.
 
 ## Policy controls
 
@@ -228,7 +228,7 @@ The defaults are:
 proposal_quorum = 3
 jury_quorum = 3
 min_lineages = 3
-max_calls = 16
+max_calls = 20
 deadline_seconds = 480
 allow_partial = true
 max_question_chars = 30000
@@ -236,6 +236,11 @@ max_stage_prompt_chars = 60000
 truncation_retries = 1
 max_recovery_output_tokens = 8192
 ```
+
+The no-config live CLI and `council.example.toml` use the 20-call ceiling.
+Existing file-backed configurations retain the pre-expansion 16-call default
+unless they set `max_calls`, so adding providers never silently raises their
+billable recovery ceiling.
 
 Most fields can be overridden for one `run`:
 
@@ -245,7 +250,7 @@ council --config ./council.toml run \
   --proposal-quorum 4 \
   --jury-quorum 4 \
   --min-lineages 4 \
-  --max-calls 16 \
+  --max-calls 20 \
   --deadline-seconds 600
 ```
 
@@ -378,10 +383,12 @@ provider calls.
 ### Credential missing
 
 Run `doctor`. Confirm that the exact logical names are available:
-`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`, and
-`MISTRAL_API_KEY`, and `XAI_API_KEY`, unless the TOML uses different
-`secret_name` values. For an external resolver, invoke it manually with a
-logical name and check only the exit status; do not paste or record its output.
+`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`,
+`MISTRAL_API_KEY`, `XAI_API_KEY`, `DASHSCOPE_API_KEY`, and
+`COHERE_API_KEY`, unless the TOML uses different `secret_name` values.
+Optional Upstage additionally requires `UPSTAGE_API_KEY`. For an external
+resolver, invoke it manually with a logical name and check only the exit status;
+do not paste or record its output.
 
 ### Authentication or permission failure
 
@@ -399,10 +406,12 @@ be completed.
 ### Rate limiting or provider server failure
 
 The adapters perform bounded retries for explicit retryable HTTP responses such
-as `429` and selected `5xx` responses. Under the default five-provider topology
-and quorum, a run may still complete with three healthy lineages when up to two
-providers are unavailable. Inspect failures and provider request IDs, wait for
-provider recovery, then resume using the same config.
+as `429` and selected `5xx` responses. Under the default seven-provider
+topology and quorum, a run may still complete with three healthy lineages when
+up to four providers are unavailable. That is degraded execution, not evidence
+that three answers equal a clean seven-member council. Inspect failures and
+provider request IDs, wait for provider recovery, then resume using the same
+config.
 
 ### Timeout or deadline exhaustion
 

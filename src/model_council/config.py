@@ -20,6 +20,12 @@ DEFAULT_ENDPOINTS = {
     ),
     "mistral": "https://api.mistral.ai/v1/chat/completions",
     "xai": "https://api.x.ai/v1/responses",
+    "qwen": (
+        "https://dashscope-us.aliyuncs.com/"
+        "compatible-mode/v1/chat/completions"
+    ),
+    "cohere": "https://api.cohere.ai/v2/chat",
+    "upstage": "https://api.upstage.ai/v1/chat/completions",
 }
 
 DEFAULT_MODELS = {
@@ -28,6 +34,9 @@ DEFAULT_MODELS = {
     "gemini": "gemini-3.6-flash",
     "mistral": "mistral-medium-3-5",
     "xai": "grok-4.5",
+    "qwen": "qwen3.7-max",
+    "cohere": "command-a-plus-05-2026",
+    "upstage": "solar-pro3-260323",
 }
 
 DEFAULT_SECRETS = {
@@ -36,6 +45,9 @@ DEFAULT_SECRETS = {
     "gemini": "GEMINI_API_KEY",
     "mistral": "MISTRAL_API_KEY",
     "xai": "XAI_API_KEY",
+    "qwen": "DASHSCOPE_API_KEY",
+    "cohere": "COHERE_API_KEY",
+    "upstage": "UPSTAGE_API_KEY",
 }
 
 DEFAULT_LINEAGES = {
@@ -44,6 +56,9 @@ DEFAULT_LINEAGES = {
     "gemini": "google-gemini",
     "mistral": "mistral",
     "xai": "xai-grok",
+    "qwen": "alibaba-qwen",
+    "cohere": "cohere-command",
+    "upstage": "upstage-solar",
 }
 
 DEFAULT_STAGE_MAX_OUTPUT_TOKENS = {
@@ -64,10 +79,31 @@ ALLOWED_ENDPOINT_HOSTS = {
     "gemini": {"generativelanguage.googleapis.com"},
     "mistral": {"api.mistral.ai"},
     "xai": {"api.x.ai"},
+    "qwen": {
+        "dashscope-us.aliyuncs.com",
+        "dashscope-intl.aliyuncs.com",
+        "dashscope.aliyuncs.com",
+        "cn-hongkong.dashscope.aliyuncs.com",
+    },
+    "cohere": {"api.cohere.ai"},
+    "upstage": {"api.upstage.ai"},
     "mock": {"localhost", "127.0.0.1"},
 }
 
-_PROVIDERS_ADDED_AFTER_V0_2 = frozenset({"xai"})
+DEFAULT_LIVE_PROVIDER_NAMES = (
+    "openai",
+    "anthropic",
+    "gemini",
+    "mistral",
+    "xai",
+    "qwen",
+    "cohere",
+)
+OPTIONAL_PROVIDER_NAMES = ("upstage",)
+KNOWN_PROVIDER_NAMES = DEFAULT_LIVE_PROVIDER_NAMES + OPTIONAL_PROVIDER_NAMES
+_PROVIDERS_ADDED_AFTER_V0_2 = frozenset(
+    {"xai", "qwen", "cohere", "upstage"}
+)
 _SECRET_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
@@ -98,6 +134,20 @@ def _default_provider(name: str) -> ProviderConfig:
             stage: 4_096 for stage in COUNCIL_STAGES
         }
         extra["thinking_level"] = "low"
+    elif name == "qwen":
+        # Qwen's JSON-object mode is less reliable when thinking is enabled.
+        # Keep the bounded council protocol deterministic unless an operator
+        # explicitly opts into and budgets thinking in a reviewed config.
+        extra["enable_thinking"] = False
+    elif name == "cohere":
+        # Command A+ enables thinking by default. Bound it so the 2,200-token
+        # jury allowance still leaves more than Cohere's recommended 1,000
+        # tokens for the visible response.
+        extra["thinking"] = {"token_budget": 800}
+    elif name == "upstage":
+        # Solar Pro 3 medium/high reasoning reserves at least 4,096/8,192
+        # tokens. Low disables reasoning and fits the bounded council stages.
+        extra["reasoning_effort"] = "low"
     return ProviderConfig(
         name=name,
         model=model_override or DEFAULT_MODELS[name],
@@ -114,9 +164,12 @@ def default_config() -> AppConfig:
     return AppConfig(
         providers=tuple(
             _default_provider(name)
-            for name in ("openai", "anthropic", "gemini", "mistral", "xai")
+            for name in DEFAULT_LIVE_PROVIDER_NAMES
         ),
-        policy=RunPolicy(),
+        # Seven clean participants require 15 calls. Preserve the previous
+        # five-call recovery margin rather than making the larger default
+        # topology consume the entire application-level budget.
+        policy=RunPolicy(max_calls=20),
         synthesis_provider="openai",
         data_dir=default_data_dir(),
     )
@@ -224,7 +277,10 @@ def load_config(path: str | Path | None = None) -> AppConfig:
     provider_raw = dict(raw.get("providers") or {})
 
     providers: list[ProviderConfig] = []
-    defaults = {provider.name: provider for provider in base.providers}
+    defaults = {
+        name: _default_provider(name)
+        for name in KNOWN_PROVIDER_NAMES
+    }
     for name, default in defaults.items():
         # A file-backed configuration written before a provider was added must
         # not silently acquire another credential requirement or billable
@@ -275,7 +331,10 @@ def load_config(path: str | Path | None = None) -> AppConfig:
             validate_provider_config(provider)
             providers.append(provider)
 
-    policy = RunPolicy.from_dict({**base.policy.to_dict(), **policy_raw})
+    # File-backed configurations retain the pre-expansion policy defaults.
+    # This avoids silently increasing the billable recovery ceiling for an
+    # existing operator config; new seven-provider files should set 20.
+    policy = RunPolicy.from_dict({**RunPolicy().to_dict(), **policy_raw})
     synthesis_provider = str(
         run_raw.get("synthesis_provider", base.synthesis_provider)
     )

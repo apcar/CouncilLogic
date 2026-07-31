@@ -4,10 +4,13 @@ from model_council.models import ProviderConfig
 
 from .anthropic import AnthropicProvider
 from .base import Provider
+from .cohere import CohereProvider
 from .gemini import GeminiProvider
 from .mistral import MistralProvider
 from .mock import MockProvider
 from .openai import OpenAIProvider
+from .qwen import QwenProvider
+from .upstage import UpstageProvider
 from .xai import XAIProvider
 
 
@@ -23,6 +26,9 @@ def create_provider(
         "gemini": GeminiProvider,
         "mistral": MistralProvider,
         "xai": XAIProvider,
+        "qwen": QwenProvider,
+        "cohere": CohereProvider,
+        "upstage": UpstageProvider,
     }
     provider_type = providers.get(config.name)
     if provider_type is None:

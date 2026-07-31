@@ -9,19 +9,20 @@ controls, but it is not a production identity, billing, or Internet-facing
 system. Live service, Cloudflare or another remote front door, work use, and
 commercial use remain gated.
 
-The five-provider CLI is a separate surface. Local tests and prior live checks
+The seven-provider CLI is a separate surface. Local tests and prior live checks
 do not remove the alpha boundaries below, establish current provider health,
 or authorize service deployment.
 
 Before using sensitive material, decide whether sending that material to all
-five providers is permitted under the applicable contracts, account settings,
-data residency requirements, and law.
+configured providers is permitted under the applicable contracts, account
+settings, data residency requirements, and law.
 
 ## Assets and trust boundaries
 
 The principal assets are:
 
-- OpenAI, Anthropic, Gemini, Mistral, and xAI API credentials.
+- OpenAI, Anthropic, Gemini, Mistral, xAI, Alibaba Model Studio, and Cohere API
+  credentials, plus Upstage when its optional adapter is enabled.
 - Questions and contextual information supplied by the operator.
 - Provider prompts and raw responses.
 - Jury records, aggregate rankings, and synthesized answers.
@@ -49,7 +50,7 @@ The trust boundaries are:
 
 The `0.2.0a1` service accepts only loopback bind addresses and constructs four
 deterministic mock lineages. This frozen reference fixture does not mirror the
-five-provider live CLI.
+seven-provider live CLI.
 Startup rejects a store containing any live-mode run. This is a fail-closed
 separation from the live CLI, not permission to add a tunnel.
 
@@ -167,6 +168,12 @@ api.anthropic.com
 generativelanguage.googleapis.com
 api.mistral.ai
 api.x.ai
+dashscope-us.aliyuncs.com
+dashscope-intl.aliyuncs.com
+dashscope.aliyuncs.com
+cn-hongkong.dashscope.aliyuncs.com
+api.cohere.ai
+api.upstage.ai
 ```
 
 Embedded URL credentials and non-allowlisted hosts are rejected. This reduces
@@ -201,9 +208,13 @@ are treated as invalid artifacts rather than trusted records.
 
 ### Diversity and blinded evaluation
 
-The default live configuration uses five separately named lineages. Candidate
+The default live configuration uses seven separately named lineages. Candidate
 provider names are replaced by shuffled labels for jury prompts, and aggregate
 input is anonymized for synthesis.
+
+Upstage is a known but disabled eighth lineage. Its adapter and destination
+restriction do not make it live-ready; enable it only after credential setup
+and a non-sensitive structured-output canary.
 
 This is metadata blinding, not anonymity. Models may infer authorship from
 style, content, capabilities, or shared training data. Providers are not
@@ -245,7 +256,7 @@ request metadata, and configured secret *names*. It is plaintext.
 Do not submit:
 
 - API keys, passwords, recovery codes, private keys, or session tokens.
-- Material whose disclosure to all five providers is prohibited.
+- Material whose disclosure to every configured provider is prohibited.
 - Personal or regulated data that has not passed the relevant review.
 - Unredacted production incidents when a minimum reproduction will do.
 

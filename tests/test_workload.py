@@ -23,15 +23,23 @@ from model_council.workload import (  # noqa: E402
 
 
 class WorkloadPlanningTests(unittest.TestCase):
-    def test_five_provider_upper_bound_fits_default_prompt_budget(self) -> None:
+    def test_seven_provider_upper_bound_fits_default_prompt_budget(self) -> None:
         plan = estimate_workload(
             "Choose the safer implementation.",
-            ("openai", "anthropic", "gemini", "mistral", "xai"),
+            (
+                "openai",
+                "anthropic",
+                "gemini",
+                "mistral",
+                "xai",
+                "qwen",
+                "cohere",
+            ),
             RunPolicy(),
         )
 
         self.assertTrue(plan["within_limits"])
-        self.assertEqual(plan["provider_count"], 5)
+        self.assertEqual(plan["provider_count"], 7)
         self.assertLess(
             plan["stage_prompt_chars"]["proposal"],
             plan["stage_prompt_chars"]["jury"],
@@ -54,14 +62,22 @@ class WorkloadPlanningTests(unittest.TestCase):
         )
         plan = estimate_workload(
             "x" * 30_000,
-            ("openai", "anthropic", "gemini", "mistral", "xai"),
+            (
+                "openai",
+                "anthropic",
+                "gemini",
+                "mistral",
+                "xai",
+                "qwen",
+                "cohere",
+            ),
             policy,
         )
 
         self.assertFalse(plan["question_limit_exceeded"])
         self.assertEqual(
             plan["prompt_limit_exceeded_stages"],
-            ["synthesis"],
+            ["jury", "synthesis"],
         )
         with self.assertRaisesRegex(
             ValueError,
@@ -69,11 +85,42 @@ class WorkloadPlanningTests(unittest.TestCase):
         ):
             require_workload_within_limits(plan)
 
+    def test_optional_eighth_provider_fits_a_small_bench_question(self) -> None:
+        plan = estimate_workload(
+            "Canary the optional provider.",
+            (
+                "openai",
+                "anthropic",
+                "gemini",
+                "mistral",
+                "xai",
+                "qwen",
+                "cohere",
+                "upstage",
+            ),
+            RunPolicy(max_calls=20),
+        )
+
+        self.assertTrue(plan["within_limits"])
+        self.assertEqual(plan["provider_count"], 8)
+        self.assertLessEqual(
+            plan["stage_prompt_chars"]["synthesis"],
+            plan["max_stage_prompt_chars"],
+        )
+
     def test_synthesis_bound_covers_maximal_all_candidate_tie(
         self,
     ) -> None:
         question = "Bound a tied synthesis."
-        providers = ("openai", "anthropic", "gemini", "mistral", "xai")
+        providers = (
+            "openai",
+            "anthropic",
+            "gemini",
+            "mistral",
+            "xai",
+            "qwen",
+            "cohere",
+        )
         labels = [
             candidate_label(index) for index in range(len(providers))
         ]

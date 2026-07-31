@@ -18,7 +18,9 @@ CouncilLogic is a local-first, auditable orchestration and governance layer for
 heterogeneous language-model deliberation. It sends a question to configured
 providers independently, blinds and aggregates their judgments, synthesizes the
 result, and stores the complete run record locally. It currently ships with
-adapters for OpenAI, Anthropic, Gemini, Mistral, and xAI's Grok.
+live adapters for OpenAI, Anthropic, Gemini, Mistral, xAI's Grok, Alibaba's
+Qwen, and Cohere Command. An Upstage Solar adapter is available as an optional,
+disabled bench provider.
 
 This repository is a **public alpha (`0.2.0a1`)**, not a production service or
 a truth oracle. Multiple models can share the same error. Verify consequential
@@ -49,7 +51,7 @@ record.
 That is a single-operator origin, not a validation result. Published research
 makes heterogeneous model juries and aggregation worth testing, but also
 documents correlated errors and inconsistent gains. The current test suite
-establishes software behavior; it does not show that eleven calls outperform a
+establishes software behavior; it does not show that fifteen calls outperform a
 strong single model. Establishing that would require matched-cost baselines,
 protocol ablations, and evaluation across additional users and task domains.
 See [Research](docs/RESEARCH.md).
@@ -64,11 +66,11 @@ See [Research](docs/RESEARCH.md).
 4. **Synthesize:** the selected lineage receives bounded candidates, the
    aggregate, and compact vote records and writes the final answer.
 
-A default live run uses eleven application-level calls: five proposals, five
-juries, and one synthesis. Mock mode and the frozen `0.2.0a1` service reference
-topology remain four-lineage, nine-call fixtures. Successful work is persisted
-and reused on resume. The application does not give models tools, web access,
-code execution, or model-initiated actions.
+A default live run uses fifteen application-level calls: seven proposals,
+seven juries, and one synthesis. Mock mode and the frozen `0.2.0a1` service
+reference topology remain four-lineage, nine-call fixtures. Successful work is
+persisted and reused on resume. The application does not give models tools,
+web access, code execution, or model-initiated actions.
 
 ## Workload reliability
 
@@ -120,7 +122,7 @@ council --mock --data-dir ./work/demo export RUN_ID \
 
 ## Live CLI setup
 
-The default live CLI sends the question and candidate text to all five
+The default live CLI sends the question and candidate text to all seven
 configured providers. Review provider contracts, data handling, model
 availability, and cost controls before using sensitive material.
 
@@ -130,11 +132,18 @@ export ANTHROPIC_API_KEY="..."
 export GEMINI_API_KEY="..."
 export MISTRAL_API_KEY="..."
 export XAI_API_KEY="..."
+export DASHSCOPE_API_KEY="..."
+export COHERE_API_KEY="..."
 
 council doctor
 council providers
 council run --question "Your decision question"
 ```
+
+Upstage is registered but disabled in `council.example.toml`. Enabling it adds
+an eighth participant, requires `UPSTAGE_API_KEY`, and should follow a direct
+live proposal/jury canary because its structured-output compatibility has not
+yet been verified in this project.
 
 Avoid putting credentials in shell history. For durable use, configure
 `MODEL_COUNCIL_SECRET_COMMAND` with an absolute executable path. The executable
