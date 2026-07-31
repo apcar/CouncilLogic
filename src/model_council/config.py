@@ -21,7 +21,7 @@ DEFAULT_ENDPOINTS = {
     "mistral": "https://api.mistral.ai/v1/chat/completions",
     "xai": "https://api.x.ai/v1/responses",
     "qwen": (
-        "https://dashscope-us.aliyuncs.com/"
+        "https://dashscope-intl.aliyuncs.com/"
         "compatible-mode/v1/chat/completions"
     ),
     "cohere": "https://api.cohere.ai/v2/chat",
@@ -80,8 +80,8 @@ ALLOWED_ENDPOINT_HOSTS = {
     "mistral": {"api.mistral.ai"},
     "xai": {"api.x.ai"},
     "qwen": {
-        "dashscope-us.aliyuncs.com",
         "dashscope-intl.aliyuncs.com",
+        "dashscope-us.aliyuncs.com",
         "dashscope.aliyuncs.com",
         "cn-hongkong.dashscope.aliyuncs.com",
     },

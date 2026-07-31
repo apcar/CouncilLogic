@@ -390,6 +390,10 @@ Optional Upstage additionally requires `UPSTAGE_API_KEY`. For an external
 resolver, invoke it manually with a logical name and check only the exit status;
 do not paste or record its output.
 
+The default Qwen endpoint is the Singapore/International DashScope route.
+Confirm that `DASHSCOPE_API_KEY` was issued in that region; Alibaba Model Studio
+keys are regional and are not interchangeable.
+
 ### Authentication or permission failure
 
 Inspect the run's structured failure category and provider request ID. Confirm

@@ -140,6 +140,10 @@ council providers
 council run --question "Your decision question"
 ```
 
+The default Qwen destination is Alibaba Model Studio's
+Singapore/International endpoint. `DASHSCOPE_API_KEY` must be issued for that
+region; Alibaba regional keys are not interchangeable.
+
 Upstage is registered but disabled in `council.example.toml`. Enabling it adds
 an eighth participant, requires `UPSTAGE_API_KEY`, and should follow a direct
 live proposal/jury canary because its structured-output compatibility has not

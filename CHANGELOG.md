@@ -58,6 +58,8 @@ All notable public changes to CouncilLogic are recorded here.
   into a higher ceiling; the default cooperative deadline remains 480 seconds.
 - Gemini uses low thinking by default and a 4,096-token stage budget so hidden
   thinking is less likely to consume the visible artifact budget.
+- Qwen defaults to Alibaba Model Studio's Singapore/International endpoint;
+  other official regional hosts remain available only through explicit config.
 - Replaced the fixed-member square logo with a provider-count-neutral
   CouncilLogic mark and PageParcel-sized README header, and made the public
   product framing independent of the current provider roster.

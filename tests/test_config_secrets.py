@@ -91,6 +91,22 @@ class ConfigurationTests(unittest.TestCase):
             {provider.name for provider in config.providers},
         )
 
+    def test_default_qwen_uses_singapore_international_route(self) -> None:
+        qwen = next(
+            provider
+            for provider in default_config().providers
+            if provider.name == "qwen"
+        )
+
+        self.assertEqual(qwen.model, "qwen3.7-max")
+        self.assertEqual(
+            qwen.endpoint,
+            (
+                "https://dashscope-intl.aliyuncs.com/"
+                "compatible-mode/v1/chat/completions"
+            ),
+        )
+
     def test_legacy_file_config_does_not_silently_enable_new_providers(
         self,
     ) -> None:

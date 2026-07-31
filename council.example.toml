@@ -62,6 +62,8 @@ stage_max_output_tokens = { proposal = 3200, jury = 2200, synthesis = 3200 }
 stage_timeout_seconds = { proposal = 150, jury = 120, synthesis = 180 }
 
 [providers.qwen]
+# The default endpoint is Alibaba Model Studio's Singapore/International route.
+# Use a DASHSCOPE_API_KEY issued for that region.
 model = "qwen3.7-max"
 secret_name = "DASHSCOPE_API_KEY"
 max_output_tokens = 1800

@@ -916,7 +916,7 @@ class FactoryAndMockTests(unittest.TestCase):
             config(
                 "qwen",
                 (
-                    "https://dashscope-us.aliyuncs.com/"
+                    "https://dashscope-intl.aliyuncs.com/"
                     "compatible-mode/v1/chat/completions"
                 ),
                 "qwen3.7-max",

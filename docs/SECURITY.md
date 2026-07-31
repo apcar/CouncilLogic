@@ -168,13 +168,17 @@ api.anthropic.com
 generativelanguage.googleapis.com
 api.mistral.ai
 api.x.ai
-dashscope-us.aliyuncs.com
 dashscope-intl.aliyuncs.com
+dashscope-us.aliyuncs.com
 dashscope.aliyuncs.com
 cn-hongkong.dashscope.aliyuncs.com
 api.cohere.ai
 api.upstage.ai
 ```
+
+Qwen defaults to `dashscope-intl.aliyuncs.com`, Alibaba Model Studio's
+Singapore/International route. The remaining Alibaba hosts are allowed only
+for explicit regional overrides; keys and data-processing regions must match.
 
 Embedded URL credentials and non-allowlisted hosts are rejected. This reduces
 accidental key exfiltration through configuration. It is not certificate

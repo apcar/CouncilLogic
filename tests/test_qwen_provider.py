@@ -24,7 +24,7 @@ from model_council.providers.qwen import QwenProvider  # noqa: E402
 
 
 ENDPOINT = (
-    "https://dashscope-us.aliyuncs.com/compatible-mode/v1/chat/completions"
+    "https://dashscope-intl.aliyuncs.com/compatible-mode/v1/chat/completions"
 )
 
 
