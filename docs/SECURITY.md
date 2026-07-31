@@ -192,7 +192,10 @@ can constrain output before it reaches the local parser. Proposal field sizes
 and list counts are bounded; synthesis receives those bounded artifacts and
 compact vote records rather than full jury prose. No question, candidate text,
 personal data, or secret is placed in a schema itself. The application still
-validates every returned object and jury candidate label locally.
+validates every returned object and jury candidate label locally. When a
+provider does not implement a portable length or item-count keyword, the
+adapter removes that keyword, preserves its bound in the field description,
+and still enforces the canonical bound after the response returns.
 Provider refusals and output-limit truncation can bypass schema guarantees and
 are treated as invalid artifacts rather than trusted records.
 

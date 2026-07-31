@@ -15,7 +15,7 @@ from typing import Any
 
 
 PROTOCOL_ID = "independent-jury"
-PROTOCOL_VERSION = "1.1.1-beta"
+PROTOCOL_VERSION = "1.1.2-beta"
 CANDIDATE_LABEL_PREFIX = "CANDIDATE_"
 
 PROPOSAL_OUTCOME_MAX_CHARS = 600
@@ -109,8 +109,10 @@ Rules:
 - rationale must be a concise non-empty string.
 - In free-text fields, refer to a candidate only by its exact full allowed
   label. Never abbreviate, renumber, or reinterpret a candidate label.
-- Keep rationale under 700 characters, each array to at most four items, and
-  each array item under 280 characters.
+- Aim for no more than 500 characters in rationale, three items per array, and
+  180 characters per array item. Hard schema limits are at most 700 characters
+  in rationale, four items per array, and 280 characters per array item. Keep
+  headroom rather than filling a field to its hard limit.
 - Do not add keys."""
 
 
@@ -194,34 +196,57 @@ def candidate_label(index: int) -> str:
 def proposal_json_schema() -> dict[str, Any]:
     """Return the bounded JSON Schema for independent proposal artifacts."""
 
-    def string_array(max_items: int, max_chars: int) -> dict[str, Any]:
+    def bounded_string(
+        description: str,
+        max_chars: int,
+    ) -> dict[str, Any]:
+        return {
+            "type": "string",
+            "description": (
+                f"{description} Must contain between 1 and {max_chars} "
+                "characters."
+            ),
+            "minLength": 1,
+            "maxLength": max_chars,
+        }
+
+    def string_array(
+        description: str,
+        max_items: int,
+        max_chars: int,
+    ) -> dict[str, Any]:
         return {
             "type": "array",
+            "description": (
+                f"{description} Must contain at most {max_items} items."
+            ),
             "maxItems": max_items,
-            "items": {
-                "type": "string",
-                "minLength": 1,
-                "maxLength": max_chars,
-            },
+            "items": bounded_string(
+                "One concise, non-empty item.",
+                max_chars,
+            ),
         }
 
     return {
         "type": "object",
         "properties": {
-            "outcome": {
-                "type": "string",
-                "minLength": 1,
-                "maxLength": PROPOSAL_OUTCOME_MAX_CHARS,
-            },
+            "outcome": bounded_string(
+                "The recommended outcome or a clear statement that none is "
+                "supported.",
+                PROPOSAL_OUTCOME_MAX_CHARS,
+            ),
             "evidence_and_reasoning": string_array(
+                "Material evidence and reasoning, one reason per item.",
                 PROPOSAL_REASON_MAX_ITEMS,
                 PROPOSAL_REASON_MAX_CHARS,
             ),
             "uncertainty": string_array(
+                "Material uncertainties or assumptions, one per item.",
                 PROPOSAL_UNCERTAINTY_MAX_ITEMS,
                 PROPOSAL_UNCERTAINTY_MAX_CHARS,
             ),
             "verification_needed": string_array(
+                "Specific checks needed before relying on the outcome.",
                 PROPOSAL_VERIFICATION_MAX_ITEMS,
                 PROPOSAL_VERIFICATION_MAX_CHARS,
             ),
@@ -239,39 +264,72 @@ def proposal_json_schema() -> dict[str, Any]:
 def jury_json_schema() -> dict[str, Any]:
     """Return the portable JSON Schema used for constrained jury output."""
 
+    def bounded_string(
+        description: str,
+        max_chars: int,
+    ) -> dict[str, Any]:
+        return {
+            "type": "string",
+            "description": (
+                f"{description} Must contain between 1 and {max_chars} "
+                "characters."
+            ),
+            "minLength": 1,
+            "maxLength": max_chars,
+        }
+
+    def bounded_list(description: str) -> dict[str, Any]:
+        return {
+            "type": "array",
+            "description": (
+                f"{description} Must contain at most "
+                f"{JURY_LIST_MAX_ITEMS} items."
+            ),
+            "maxItems": JURY_LIST_MAX_ITEMS,
+            "items": bounded_string(
+                "One concise, non-empty item.",
+                JURY_LIST_ITEM_MAX_CHARS,
+            ),
+        }
+
     return {
         "type": "object",
         "properties": {
-            "winner": {"type": ["string", "null"]},
-            "ranking": {"type": "array", "items": {"type": "string"}},
+            "winner": {
+                "type": ["string", "null"],
+                "description": (
+                    "The selected candidate label, or null when abstaining."
+                ),
+            },
+            "ranking": {
+                "type": "array",
+                "description": (
+                    "Every allowed candidate label from best to worst, or an "
+                    "empty array when abstaining."
+                ),
+                "items": {"type": "string"},
+            },
             "confidence": {
                 "type": "string",
+                "description": "Confidence in the judgment.",
                 "enum": ["low", "medium", "high"],
             },
-            "abstain": {"type": "boolean"},
-            "rationale": {
-                "type": "string",
-                "minLength": 1,
-                "maxLength": JURY_RATIONALE_MAX_CHARS,
+            "abstain": {
+                "type": "boolean",
+                "description": (
+                    "True only when no candidate can be selected reliably."
+                ),
             },
-            "material_disagreements": {
-                "type": "array",
-                "maxItems": JURY_LIST_MAX_ITEMS,
-                "items": {
-                    "type": "string",
-                    "minLength": 1,
-                    "maxLength": JURY_LIST_ITEM_MAX_CHARS,
-                },
-            },
-            "verification_needed": {
-                "type": "array",
-                "maxItems": JURY_LIST_MAX_ITEMS,
-                "items": {
-                    "type": "string",
-                    "minLength": 1,
-                    "maxLength": JURY_LIST_ITEM_MAX_CHARS,
-                },
-            },
+            "rationale": bounded_string(
+                "A concise comparison grounded in the candidates.",
+                JURY_RATIONALE_MAX_CHARS,
+            ),
+            "material_disagreements": bounded_list(
+                "Material unresolved disagreements, if any."
+            ),
+            "verification_needed": bounded_list(
+                "Specific checks needed before relying on the result."
+            ),
         },
         "required": [
             "winner",

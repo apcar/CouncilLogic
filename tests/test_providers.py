@@ -429,6 +429,60 @@ class ParsingTests(unittest.TestCase):
                 {"minLength", "maxLength", "maxItems"}
                 .isdisjoint(schema_keys(schema))
             )
+            if stage == "proposal":
+                properties = schema["properties"]
+                self.assertIn(
+                    "600 characters",
+                    properties["outcome"]["description"],
+                )
+                self.assertIn(
+                    "Must contain at most 4 items",
+                    properties["evidence_and_reasoning"][
+                        "description"
+                    ],
+                )
+                self.assertIn(
+                    "350 characters",
+                    properties["evidence_and_reasoning"]["items"][
+                        "description"
+                    ],
+                )
+                self.assertIn(
+                    "Must contain at most 3 items",
+                    properties["uncertainty"]["description"],
+                )
+                self.assertIn(
+                    "280 characters",
+                    properties["uncertainty"]["items"]["description"],
+                )
+                self.assertIn(
+                    "Must contain at most 4 items",
+                    properties["verification_needed"]["description"],
+                )
+                self.assertIn(
+                    "280 characters",
+                    properties["verification_needed"]["items"][
+                        "description"
+                    ],
+                )
+            else:
+                properties = schema["properties"]
+                self.assertIn(
+                    "700 characters",
+                    properties["rationale"]["description"],
+                )
+                for field_name in (
+                    "material_disagreements",
+                    "verification_needed",
+                ):
+                    self.assertIn(
+                        "Must contain at most 4 items",
+                        properties[field_name]["description"],
+                    )
+                    self.assertIn(
+                        "280 characters",
+                        properties[field_name]["items"]["description"],
+                    )
             canonical = structured_output_schema(stage)
             self.assertIsNotNone(canonical)
             self.assertTrue(

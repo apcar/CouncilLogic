@@ -229,6 +229,44 @@ class PromptAndIdentityTests(unittest.TestCase):
             schema["properties"]["outcome"]["maxLength"],
             600,
         )
+        self.assertIn(
+            "600 characters",
+            schema["properties"]["outcome"]["description"],
+        )
+        self.assertIn(
+            "Must contain at most 4 items",
+            schema["properties"]["evidence_and_reasoning"][
+                "description"
+            ],
+        )
+        self.assertIn(
+            "350 characters",
+            schema["properties"]["evidence_and_reasoning"]["items"][
+                "description"
+            ],
+        )
+        self.assertIn(
+            "Must contain at most 3 items",
+            schema["properties"]["uncertainty"]["description"],
+        )
+        self.assertIn(
+            "280 characters",
+            schema["properties"]["uncertainty"]["items"][
+                "description"
+            ],
+        )
+        self.assertIn(
+            "Must contain at most 4 items",
+            schema["properties"]["verification_needed"][
+                "description"
+            ],
+        )
+        self.assertIn(
+            "280 characters",
+            schema["properties"]["verification_needed"]["items"][
+                "description"
+            ],
+        )
         self.assertFalse(schema["additionalProperties"])
 
     def test_jury_schema_requires_every_protocol_field(self) -> None:
@@ -243,6 +281,34 @@ class PromptAndIdentityTests(unittest.TestCase):
             "material_disagreements",
             "verification_needed",
         })
+        self.assertIn(
+            "700 characters",
+            schema["properties"]["rationale"]["description"],
+        )
+        self.assertIn(
+            "Must contain at most 4 items",
+            schema["properties"]["material_disagreements"][
+                "description"
+            ],
+        )
+        self.assertIn(
+            "280 characters",
+            schema["properties"]["material_disagreements"]["items"][
+                "description"
+            ],
+        )
+        self.assertIn(
+            "Must contain at most 4 items",
+            schema["properties"]["verification_needed"][
+                "description"
+            ],
+        )
+        self.assertIn(
+            "280 characters",
+            schema["properties"]["verification_needed"]["items"][
+                "description"
+            ],
+        )
         self.assertFalse(schema["additionalProperties"])
 
     def test_prompts_preserve_protocol_boundaries(self) -> None:
@@ -270,6 +336,11 @@ class PromptAndIdentityTests(unittest.TestCase):
         self.assertIn("untrusted question data", proposal_user)
         self.assertIn("metadata-blind", jury_system)
         self.assertIn('"winner"', jury_system)
+        self.assertIn(
+            "no more than 500 characters in rationale",
+            jury_system,
+        )
+        self.assertIn("Hard schema limits are at most 700", jury_system)
         self.assertIn('"B": "Second"', jury_user)
         self.assertIn("not a new juror", synthesis_system)
         self.assertIn("## Dissent", synthesis_system)
@@ -279,10 +350,10 @@ class PromptAndIdentityTests(unittest.TestCase):
 
     def test_protocol_identity_and_stable_hash(self) -> None:
         self.assertEqual(PROTOCOL_ID, "independent-jury")
-        self.assertEqual(PROTOCOL_VERSION, "1.1.1-beta")
+        self.assertEqual(PROTOCOL_VERSION, "1.1.2-beta")
         self.assertEqual(
             protocol_hash(),
-            "6e51c14baf862e5ceb897092410d5edfaef177c785a6637b4d5d19c549007e48",
+            "af3bb70e9e6a205438703001e31a7bdae1cf167980243b1f87752c8e8ad2ca32",
         )
 
 
