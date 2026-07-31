@@ -50,6 +50,8 @@ class CliTests(unittest.TestCase):
                     "4",
                     "--max-calls",
                     "9",
+                    "--max-parallel-calls",
+                    "2",
                     "--json",
                 ]
             )
@@ -79,6 +81,10 @@ class CliTests(unittest.TestCase):
             self.assertEqual(code, 0, error)
             inspected = json.loads(output)
             self.assertEqual(inspected["run"]["id"], run_id)
+            self.assertEqual(
+                inspected["run"]["policy"]["max_parallel_calls"],
+                2,
+            )
             self.assertEqual(len(inspected["invocations"]), 9)
             self.assertTrue(
                 any(

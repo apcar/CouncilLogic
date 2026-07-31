@@ -8,6 +8,7 @@ import socket
 import sys
 import threading
 import unittest
+from urllib.error import URLError
 from urllib.request import Request
 
 
@@ -830,8 +831,13 @@ class RetryAndErrorTests(unittest.TestCase):
             socket.timeout(),
             response(200, {"would": "duplicate"}),
         )
+        ticks = iter((10.0, 12.345))
         with self.assertRaises(ProviderError) as caught:
-            client(transport).post_json(
+            JsonHttpClient(
+                transport=transport,
+                sleep=lambda _: None,
+                monotonic=lambda: next(ticks),
+            ).post_json(
                 url="https://api.example.test/generate",
                 headers={},
                 payload={},
@@ -842,6 +848,75 @@ class RetryAndErrorTests(unittest.TestCase):
         self.assertEqual(caught.exception.category, ErrorCategory.TIMEOUT)
         self.assertTrue(caught.exception.ambiguous)
         self.assertEqual(len(transport.requests), 1)
+        request_headers = {
+            key.casefold(): value
+            for key, value in transport.requests[0].header_items()
+        }
+        telemetry = caught.exception.to_dict()
+        self.assertEqual(
+            telemetry["client_request_id"],
+            request_headers["x-client-request-id"],
+        )
+        self.assertEqual(telemetry["elapsed_ms"], 2345)
+        self.assertEqual(
+            telemetry["transport_phase"],
+            "request_in_flight",
+        )
+        self.assertEqual(
+            telemetry["timeout_subtype"],
+            "socket_or_os_timeout",
+        )
+
+    def test_transport_error_metadata_survives_attempt_wrapping(self) -> None:
+        transport = SequenceTransport(
+            ProviderError(
+                "bounded transport fixture",
+                category=ErrorCategory.TIMEOUT,
+                retryable=True,
+                ambiguous=True,
+                client_request_id="original-client-id",
+                elapsed_ms=321,
+                transport_phase="response_read",
+                timeout_subtype="fixture_timeout",
+            )
+        )
+
+        with self.assertRaises(ProviderError) as caught:
+            client(transport).post_json(
+                url="https://api.example.test/generate",
+                headers={},
+                payload={},
+                timeout_seconds=2,
+                max_attempts=3,
+            )
+
+        error = caught.exception
+        self.assertEqual(error.attempts, 1)
+        self.assertEqual(error.client_request_id, "original-client-id")
+        self.assertEqual(error.elapsed_ms, 321)
+        self.assertEqual(error.transport_phase, "response_read")
+        self.assertEqual(error.timeout_subtype, "fixture_timeout")
+
+    def test_connection_error_does_not_persist_raw_exception_text(self) -> None:
+        secret = "transport-secret-must-not-leak"
+        transport = SequenceTransport(URLError(RuntimeError(secret)))
+
+        with self.assertRaises(ProviderError) as caught:
+            client(transport).post_json(
+                url="https://api.example.test/generate",
+                headers={"Authorization": f"Bearer {secret}"},
+                payload={},
+                timeout_seconds=2,
+                max_attempts=1,
+            )
+
+        serialized = json.dumps(caught.exception.to_dict())
+        self.assertNotIn(secret, serialized)
+        self.assertIsNotNone(caught.exception.client_request_id)
+        self.assertEqual(
+            caught.exception.transport_phase,
+            "request_in_flight",
+        )
 
     def test_401_is_classified_and_never_retried(self) -> None:
         secret = "never-disclose-this-key"

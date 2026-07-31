@@ -125,6 +125,7 @@ def default_data_dir() -> Path:
 def _default_provider(name: str) -> ProviderConfig:
     model_override = os.environ.get(f"MODEL_COUNCIL_{name.upper()}_MODEL")
     stage_output_tokens = dict(DEFAULT_STAGE_MAX_OUTPUT_TOKENS)
+    stage_timeout_seconds = dict(DEFAULT_STAGE_TIMEOUT_SECONDS)
     extra: dict[str, Any] = {}
     if name == "gemini":
         # Gemini 3 Flash defaults to medium thinking. Thinking tokens count
@@ -139,6 +140,14 @@ def _default_provider(name: str) -> ProviderConfig:
         # Keep the bounded council protocol deterministic unless an operator
         # explicitly opts into and budgets thinking in a reviewed config.
         extra["enable_thinking"] = False
+        # Live canaries show that Qwen's long council prompts can legitimately
+        # run past the generic stage limits. Keep them bounded, but leave
+        # enough room for a complete response.
+        stage_timeout_seconds = {
+            "proposal": 300.0,
+            "jury": 300.0,
+            "synthesis": 360.0,
+        }
     elif name == "cohere":
         # Command A+ enables thinking by default. Bound it so the 2,200-token
         # jury allowance still leaves more than Cohere's recommended 1,000
@@ -155,7 +164,7 @@ def _default_provider(name: str) -> ProviderConfig:
         secret_name=DEFAULT_SECRETS[name],
         endpoint=DEFAULT_ENDPOINTS[name],
         stage_max_output_tokens=stage_output_tokens,
-        stage_timeout_seconds=dict(DEFAULT_STAGE_TIMEOUT_SECONDS),
+        stage_timeout_seconds=stage_timeout_seconds,
         extra=extra,
     )
 
@@ -238,6 +247,8 @@ def validate_run_policy(
             raise ValueError(f"{field_name} must be positive")
     if policy.deadline_seconds <= 0:
         raise ValueError("deadline_seconds must be positive")
+    if policy.max_parallel_calls < 1:
+        raise ValueError("max_parallel_calls must be positive")
     if policy.max_question_chars < 1:
         raise ValueError("max_question_chars must be positive")
     if policy.max_stage_prompt_chars < 1:

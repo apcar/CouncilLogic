@@ -208,6 +208,10 @@ class CouncilStoreTest(unittest.TestCase):
             request_id="failure-req",
             attempts=3,
             ambiguous=True,
+            client_request_id="client-failure-req",
+            elapsed_ms=150023,
+            transport_phase="request_in_flight",
+            timeout_subtype="socket_or_os_timeout",
         )
         self.store.finish_invocation_failure(invocation_id, failure)
         stored = self.store.list_invocations(run_id)[0]
@@ -220,6 +224,19 @@ class CouncilStoreTest(unittest.TestCase):
         self.assertEqual(stored["error_status_code"], 504)
         self.assertTrue(stored["error_ambiguous"])
         self.assertEqual(stored["error"]["category"], "timeout")
+        self.assertEqual(
+            stored["error"]["client_request_id"],
+            "client-failure-req",
+        )
+        self.assertEqual(stored["error"]["elapsed_ms"], 150023)
+        self.assertEqual(
+            stored["error"]["transport_phase"],
+            "request_in_flight",
+        )
+        self.assertEqual(
+            stored["error"]["timeout_subtype"],
+            "socket_or_os_timeout",
+        )
         self.assertIsNone(
             self.store.get_successful_invocation(run_id, "jury", "beta")
         )

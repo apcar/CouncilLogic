@@ -284,10 +284,10 @@ security control.
 ## Availability and cost
 
 The application uses bounded retries for explicit retryable HTTP responses,
-timeouts, quorum rules, an application-level call budget, process locks, and
-resumable successful stages. Ambiguous transport outcomes are not
-automatically retried. These controls improve recovery and reduce duplicate
-billable calls but do not guarantee availability.
+timeouts, quorum rules, an application-level call budget, a per-stage parallel
+call cap, process locks, and resumable successful stages. Ambiguous transport
+outcomes are not automatically retried. These controls improve recovery and
+reduce duplicate billable calls but do not guarantee availability.
 
 Before provider work begins, deterministic character-count preflight rejects
 questions or projected downstream prompts beyond configured limits. A known,
@@ -296,6 +296,10 @@ bounded output allowance; its initial raw response is preserved first.
 Ambiguous timeouts, connection failures, and crash-left-running calls remain
 non-retryable. Completed runs with any provider failure or recovery are marked
 `completion_quality=degraded`.
+
+Transport failure records contain a generated client request ID and sanitized
+numeric/taxonomy metadata (`elapsed_ms`, `transport_phase`, and
+`timeout_subtype`). Raw transport exception text is deliberately excluded.
 
 CLI `max_calls` and service call units count application-level logical provider
 invocations, not HTTP attempts made inside provider retry loops.

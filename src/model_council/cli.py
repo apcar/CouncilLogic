@@ -66,6 +66,7 @@ def _parser() -> argparse.ArgumentParser:
     run.add_argument("--jury-quorum", type=int)
     run.add_argument("--min-lineages", type=int)
     run.add_argument("--max-calls", type=int)
+    run.add_argument("--max-parallel-calls", type=int)
     run.add_argument("--deadline-seconds", type=float)
     run.add_argument("--max-question-chars", type=int)
     run.add_argument("--max-stage-prompt-chars", type=int)
@@ -128,6 +129,7 @@ def _select_run_config(
         "jury_quorum",
         "min_lineages",
         "max_calls",
+        "max_parallel_calls",
         "deadline_seconds",
         "max_question_chars",
         "max_stage_prompt_chars",

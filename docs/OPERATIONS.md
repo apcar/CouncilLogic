@@ -229,7 +229,8 @@ proposal_quorum = 3
 jury_quorum = 3
 min_lineages = 3
 max_calls = 20
-deadline_seconds = 480
+max_parallel_calls = 5
+deadline_seconds = 900
 allow_partial = true
 max_question_chars = 30000
 max_stage_prompt_chars = 60000
@@ -251,7 +252,8 @@ council --config ./council.toml run \
   --jury-quorum 4 \
   --min-lineages 4 \
   --max-calls 20 \
-  --deadline-seconds 600
+  --max-parallel-calls 5 \
+  --deadline-seconds 900
 ```
 
 The application rejects an impossible quorum, insufficient lineage diversity,
@@ -264,6 +266,12 @@ same logical stage/provider record. Each adapter may also make up to
 `max_attempts` lower-level HTTP attempts inside one application-level call.
 The setting is therefore neither an HTTP-request limit nor a monetary cost cap.
 Use provider-side budgets and alerts.
+
+`max_parallel_calls` bounds simultaneous provider requests within each stage.
+With the default of five, a seven-provider proposal or jury stage keeps at
+most five active calls and queues the rest. The value is stored in the
+immutable run policy and reused on resume; lowering it trades elapsed time for
+less simultaneous network and provider pressure.
 
 `max_question_chars` bounds the submitted question. Before creating a run, the
 workload planner also constructs protocol-bound maximum proposal artifacts and
@@ -285,7 +293,9 @@ and are never automatically retried.
 Provider TOML supports `stage_max_output_tokens` and
 `stage_timeout_seconds` maps for `proposal`, `jury`, and `synthesis`. Command
 line overrides are available for workload policy; use the TOML for
-provider/stage budgets.
+provider/stage budgets. Qwen's default stage timeouts are 300 seconds for
+proposal and jury and 360 seconds for synthesis; the other default providers
+retain the generic 150/120/180-second stage limits.
 
 `deadline_seconds` is cooperative. It prevents later work from starting once
 the deadline is observed, but it is not a process watchdog. An in-flight call
@@ -419,9 +429,12 @@ config.
 
 ### Timeout or deadline exhaustion
 
-Inspect per-invocation latency and attempts. A timeout or connection loss after
-transmission may have begun is ambiguous and is not automatically retried.
-Check provider request and billing logs before starting a replacement run.
+Inspect per-invocation latency and attempts. Transport failures also preserve a
+locally generated client request ID plus sanitized elapsed time, transport
+phase, and timeout subtype; they never persist raw exception text. A timeout or
+connection loss after transmission may have begun is ambiguous and is not
+automatically retried. Use the client request ID when checking provider request
+and billing logs before starting a replacement run.
 Distinguish an adapter request timeout from the cooperative run deadline.
 Increase timeouts or deadlines only after checking cost and operational impact.
 

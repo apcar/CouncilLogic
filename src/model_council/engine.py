@@ -663,7 +663,11 @@ class CouncilEngine:
                 existing_records.get((stage, provider_name))
             )
         }
-        with ThreadPoolExecutor(max_workers=len(allowed_names)) as executor:
+        max_workers = min(
+            self.policy.max_parallel_calls,
+            len(allowed_names),
+        )
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
             for provider_name in allowed_names:
                 system_prompt, user_prompt = work[provider_name]
                 provider = self.providers[provider_name]
@@ -994,8 +998,14 @@ class CouncilEngine:
         synthesis_provider = expected.pop(
             "synthesis_provider", self.synthesis_provider
         )
+        # Normalize older run locks through the parser so policy fields added
+        # with backward-compatible defaults do not strand resumable runs.
+        unknown_fields = set(expected) - set(RunPolicy().to_dict())
+        if unknown_fields:
+            raise ValueError("Run policy lock contains unknown fields")
+        expected_policy = RunPolicy.from_dict(expected).to_dict()
         if (
-            expected != self.policy.to_dict()
+            expected_policy != self.policy.to_dict()
             or synthesis_provider != self.synthesis_provider
         ):
             raise ValueError(

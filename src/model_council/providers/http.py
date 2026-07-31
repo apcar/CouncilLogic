@@ -153,6 +153,10 @@ def _with_attempts(error: ProviderError, attempts: int) -> ProviderError:
         request_id=error.request_id,
         attempts=attempts,
         ambiguous=error.ambiguous,
+        client_request_id=error.client_request_id,
+        elapsed_ms=error.elapsed_ms,
+        transport_phase=error.transport_phase,
+        timeout_subtype=error.timeout_subtype,
     )
 
 
@@ -166,6 +170,7 @@ class JsonHttpClient:
         sleep: Callable[[float], None] = time.sleep,
         random_value: Callable[[], float] = random.random,
         wall_time: Callable[[], float] = time.time,
+        monotonic: Callable[[], float] = time.monotonic,
         backoff_base_seconds: float = 0.5,
         backoff_cap_seconds: float = 8.0,
         max_retry_after_seconds: float = 60.0,
@@ -175,6 +180,7 @@ class JsonHttpClient:
         self._sleep = sleep
         self._random_value = random_value
         self._wall_time = wall_time
+        self._monotonic = monotonic
         self._backoff_base_seconds = max(0.0, backoff_base_seconds)
         self._backoff_cap_seconds = max(0.0, backoff_cap_seconds)
         self._max_retry_after_seconds = max(0.0, max_retry_after_seconds)
@@ -240,6 +246,7 @@ class JsonHttpClient:
                 headers=safe_headers,
                 method="POST",
             )
+            attempt_started = self._monotonic()
             try:
                 response = self._transport(request, timeout_seconds)
             except (socket.timeout, TimeoutError):
@@ -249,6 +256,10 @@ class JsonHttpClient:
                     retryable=True,
                     attempts=attempt,
                     ambiguous=True,
+                    client_request_id=client_request_id,
+                    elapsed_ms=self._elapsed_ms(attempt_started),
+                    transport_phase="request_in_flight",
+                    timeout_subtype="socket_or_os_timeout",
                 )
                 raise error from None
             except URLError as exc:
@@ -263,6 +274,14 @@ class JsonHttpClient:
                     retryable=True,
                     attempts=attempt,
                     ambiguous=True,
+                    client_request_id=client_request_id,
+                    elapsed_ms=self._elapsed_ms(attempt_started),
+                    transport_phase="request_in_flight",
+                    timeout_subtype=(
+                        "url_error_timeout"
+                        if category == ErrorCategory.TIMEOUT
+                        else None
+                    ),
                 )
                 raise error from None
             except (ConnectionError, OSError):
@@ -272,10 +291,34 @@ class JsonHttpClient:
                     retryable=True,
                     attempts=attempt,
                     ambiguous=True,
+                    client_request_id=client_request_id,
+                    elapsed_ms=self._elapsed_ms(attempt_started),
+                    transport_phase="request_in_flight",
                 )
                 raise error from None
             except ProviderError as exc:
-                raise _with_attempts(exc, attempt) from None
+                enriched = ProviderError(
+                    str(exc),
+                    category=exc.category,
+                    retryable=exc.retryable,
+                    status_code=exc.status_code,
+                    request_id=exc.request_id,
+                    attempts=exc.attempts,
+                    ambiguous=exc.ambiguous,
+                    client_request_id=(
+                        exc.client_request_id or client_request_id
+                    ),
+                    elapsed_ms=(
+                        exc.elapsed_ms
+                        if exc.elapsed_ms is not None
+                        else self._elapsed_ms(attempt_started)
+                    ),
+                    transport_phase=(
+                        exc.transport_phase or "request_in_flight"
+                    ),
+                    timeout_subtype=exc.timeout_subtype,
+                )
+                raise _with_attempts(enriched, attempt) from None
             except Exception as exc:
                 raise ProviderError(
                     f"Provider transport failed safely: {type(exc).__name__}",
@@ -283,6 +326,9 @@ class JsonHttpClient:
                     retryable=False,
                     attempts=attempt,
                     ambiguous=True,
+                    client_request_id=client_request_id,
+                    elapsed_ms=self._elapsed_ms(attempt_started),
+                    transport_phase="request_in_flight",
                 ) from None
 
             if not isinstance(response, HttpResponse):
@@ -351,6 +397,14 @@ class JsonHttpClient:
             )
 
         raise AssertionError("retry loop exhausted without returning or raising")
+
+    def _elapsed_ms(self, started_at: float) -> int:
+        """Return bounded-shape timing metadata without exception details."""
+
+        elapsed_seconds = self._monotonic() - started_at
+        if not math.isfinite(elapsed_seconds):
+            return 0
+        return max(0, int(round(elapsed_seconds * 1000)))
 
     def _retry_delay(
         self,

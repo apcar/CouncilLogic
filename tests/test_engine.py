@@ -5,6 +5,7 @@ from pathlib import Path
 import re
 import sys
 import tempfile
+import threading
 import time
 import unittest
 
@@ -150,6 +151,52 @@ class FakeProvider(Provider):
             attempts=1,
             finish_reason=finish_reason,
         )
+
+
+class ActiveCallTracker:
+    def __init__(self) -> None:
+        self.active = 0
+        self.maximum = 0
+        self.lock = threading.Lock()
+
+    def enter(self) -> None:
+        with self.lock:
+            self.active += 1
+            self.maximum = max(self.maximum, self.active)
+
+    def leave(self) -> None:
+        with self.lock:
+            self.active -= 1
+
+
+class TrackedProvider(FakeProvider):
+    def __init__(self, name: str, tracker: ActiveCallTracker) -> None:
+        super().__init__(name)
+        self.tracker = tracker
+
+    def generate(
+        self,
+        *,
+        system_prompt: str,
+        user_prompt: str,
+        stage: str,
+        max_output_tokens: int | None = None,
+        timeout_seconds: float | None = None,
+    ) -> ProviderResponse:
+        self.tracker.enter()
+        try:
+            # Sleeping releases the interpreter lock so the executor reaches
+            # the configured amount of overlap deterministically.
+            time.sleep(0.02)
+            return super().generate(
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                stage=stage,
+                max_output_tokens=max_output_tokens,
+                timeout_seconds=timeout_seconds,
+            )
+        finally:
+            self.tracker.leave()
 
 
 class CouncilEngineTests(unittest.TestCase):
@@ -578,7 +625,6 @@ class CouncilEngineTests(unittest.TestCase):
                     finish_reason="stop",
                 ),
             )
-
             recoveries = engine._provider_retry_recoveries(
                 run_id,
                 store.list_invocations(run_id),
@@ -605,6 +651,33 @@ class CouncilEngineTests(unittest.TestCase):
             ]
             self.assertEqual(len(retry_events), 2)
             self.assertEqual(store.count_calls(run_id), 3)
+
+    def test_parallel_provider_calls_never_exceed_policy_cap(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            tracker = ActiveCallTracker()
+            providers = {
+                name: TrackedProvider(name, tracker)
+                for name in ("alpha", "beta", "gamma", "delta", "epsilon")
+            }
+            engine = CouncilEngine(
+                store=CouncilStore(Path(temporary)),
+                providers=providers,
+                policy=RunPolicy(
+                    proposal_quorum=3,
+                    jury_quorum=3,
+                    min_lineages=3,
+                    max_calls=11,
+                    max_parallel_calls=2,
+                    deadline_seconds=30,
+                ),
+                synthesis_provider="alpha",
+            )
+
+            result = engine.run("Exercise the bounded worker pool.")
+
+            self.assertEqual(result["status"], "completed")
+            self.assertEqual(tracker.maximum, 2)
+            self.assertEqual(tracker.active, 0)
 
     def test_partial_jury_run_exposes_and_validates_namespace_lock(
         self,
@@ -1159,6 +1232,19 @@ class CouncilEngineTests(unittest.TestCase):
             )
             with self.assertRaisesRegex(ValueError, "synthesis provider"):
                 changed_synthesizer.resume(result["run_id"])
+
+    def test_policy_lock_defaults_missing_parallel_limit(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            engine, _providers, _store = self._engine(Path(temporary))
+            locked = engine.policy.to_dict()
+            locked.pop("max_parallel_calls")
+            locked["synthesis_provider"] = "alpha"
+
+            engine._validate_policy_lock(locked)
+
+            locked["unexpected_policy_field"] = True
+            with self.assertRaisesRegex(ValueError, "unknown fields"):
+                engine._validate_policy_lock(locked)
 
     def test_crash_left_running_call_is_marked_ambiguous_not_retried(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

@@ -21,6 +21,10 @@ All notable public changes to CouncilLogic are recorded here.
 - Stage-specific provider output-token and request-timeout budgets, one
   auditable larger-output recovery for known length truncations, explicit
   clean/degraded completion quality, and workload/membership telemetry.
+- A locked `max_parallel_calls` run policy and CLI override that cap active
+  provider requests within each stage; the default is five.
+- Sanitized transport-failure telemetry with the generated client request ID,
+  elapsed milliseconds, transport phase, and timeout subtype.
 
 ### Changed
 
@@ -55,11 +59,13 @@ All notable public changes to CouncilLogic are recorded here.
 - The no-config live and example-config call budget is 20, leaving five
   recovery slots above the normal fifteen-call seven-provider topology. Legacy
   file-backed configurations retain the prior 16-call default unless they opt
-  into a higher ceiling; the default cooperative deadline remains 480 seconds.
+  into a higher ceiling. The default cooperative deadline is now 900 seconds.
 - Gemini uses low thinking by default and a 4,096-token stage budget so hidden
   thinking is less likely to consume the visible artifact budget.
 - Qwen defaults to Alibaba Model Studio's Singapore/International endpoint;
   other official regional hosts remain available only through explicit config.
+  Its default proposal and jury timeouts are 300 seconds and its synthesis
+  timeout is 360 seconds.
 - Replaced the fixed-member square logo with a provider-count-neutral
   CouncilLogic mark and PageParcel-sized README header, and made the public
   product framing independent of the current provider roster.

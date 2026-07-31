@@ -138,7 +138,8 @@ class RunPolicy:
     jury_quorum: int = 3
     min_lineages: int = 3
     max_calls: int = 16
-    deadline_seconds: float = 480.0
+    max_parallel_calls: int = 5
+    deadline_seconds: float = 900.0
     allow_partial: bool = True
     max_question_chars: int = 30_000
     max_stage_prompt_chars: int = 60_000
@@ -156,7 +157,8 @@ class RunPolicy:
             jury_quorum=int(value.get("jury_quorum", 3)),
             min_lineages=int(value.get("min_lineages", 3)),
             max_calls=int(value.get("max_calls", 16)),
-            deadline_seconds=float(value.get("deadline_seconds", 480.0)),
+            max_parallel_calls=int(value.get("max_parallel_calls", 5)),
+            deadline_seconds=float(value.get("deadline_seconds", 900.0)),
             allow_partial=bool(value.get("allow_partial", True)),
             max_question_chars=int(value.get("max_question_chars", 30_000)),
             max_stage_prompt_chars=int(
@@ -180,6 +182,10 @@ class ProviderError(RuntimeError):
         request_id: str | None = None,
         attempts: int = 1,
         ambiguous: bool = False,
+        client_request_id: str | None = None,
+        elapsed_ms: int | None = None,
+        transport_phase: str | None = None,
+        timeout_subtype: str | None = None,
     ) -> None:
         super().__init__(message)
         self.category = category
@@ -188,6 +194,10 @@ class ProviderError(RuntimeError):
         self.request_id = request_id
         self.attempts = attempts
         self.ambiguous = ambiguous
+        self.client_request_id = client_request_id
+        self.elapsed_ms = elapsed_ms
+        self.transport_phase = transport_phase
+        self.timeout_subtype = timeout_subtype
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -198,4 +208,8 @@ class ProviderError(RuntimeError):
             "request_id": self.request_id,
             "attempts": self.attempts,
             "ambiguous": self.ambiguous,
+            "client_request_id": self.client_request_id,
+            "elapsed_ms": self.elapsed_ms,
+            "transport_phase": self.transport_phase,
+            "timeout_subtype": self.timeout_subtype,
         }

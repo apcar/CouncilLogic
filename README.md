@@ -81,7 +81,9 @@ projected downstream prompt graph exceeds policy, so an oversized run fails
 before incurring provider cost.
 
 Providers have separate proposal, jury, and synthesis output-token and request
-timeout budgets. Known `finish_reason=length` completions may receive one
+timeout budgets. At most five provider calls run simultaneously by default,
+and Qwen receives longer bounded stage timeouts for long council prompts. Known
+`finish_reason=length` completions may receive one
 larger-output retry when the run still has call, deadline, and recovery budget.
 The truncated response is first preserved as an audit event. Ambiguous
 timeouts, connection losses, and interrupted running calls are never retried

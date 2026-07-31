@@ -54,7 +54,8 @@ class ConfigurationTests(unittest.TestCase):
             ],
         )
         self.assertEqual(config.policy.max_calls, 20)
-        self.assertEqual(config.policy.deadline_seconds, 480.0)
+        self.assertEqual(config.policy.max_parallel_calls, 5)
+        self.assertEqual(config.policy.deadline_seconds, 900.0)
         for provider in config.providers:
             self.assertEqual(
                 set(provider.stage_max_output_tokens),
@@ -77,6 +78,14 @@ class ConfigurationTests(unittest.TestCase):
             if provider.name == "qwen"
         )
         self.assertFalse(qwen.extra["enable_thinking"])
+        self.assertEqual(
+            qwen.stage_timeout_seconds,
+            {
+                "proposal": 300.0,
+                "jury": 300.0,
+                "synthesis": 360.0,
+            },
+        )
         cohere = next(
             provider
             for provider in config.providers
@@ -121,6 +130,8 @@ class ConfigurationTests(unittest.TestCase):
                 ["openai", "anthropic", "gemini", "mistral"],
             )
             self.assertEqual(config.policy.max_calls, 16)
+            self.assertEqual(config.policy.max_parallel_calls, 5)
+            self.assertEqual(config.policy.deadline_seconds, 900.0)
 
     def test_example_config_activates_seven_and_parks_upstage(self) -> None:
         config = load_config(PROJECT_ROOT / "council.example.toml")
@@ -138,6 +149,8 @@ class ConfigurationTests(unittest.TestCase):
             ],
         )
         self.assertEqual(config.policy.max_calls, 20)
+        self.assertEqual(config.policy.max_parallel_calls, 5)
+        self.assertEqual(config.policy.deadline_seconds, 900.0)
 
     def test_example_config_can_enable_full_eight_provider_bench(self) -> None:
         example = (PROJECT_ROOT / "council.example.toml").read_text(
@@ -366,6 +379,20 @@ max_calls = 8
             )
 
             with self.assertRaisesRegex(ValueError, "Max calls"):
+                load_config(path)
+
+    def test_rejects_nonpositive_parallel_call_limit(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "config.toml"
+            path.write_text(
+                """
+[policy]
+max_parallel_calls = 0
+""",
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(ValueError, "max_parallel_calls"):
                 load_config(path)
 
 
