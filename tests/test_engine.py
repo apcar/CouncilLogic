@@ -717,6 +717,92 @@ class CouncilEngineTests(unittest.TestCase):
                 )
             )
 
+    def test_seven_provider_topology_completes_in_fifteen_calls(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            names = (
+                "openai",
+                "anthropic",
+                "gemini",
+                "mistral",
+                "xai",
+                "qwen",
+                "cohere",
+            )
+            providers = {name: FakeProvider(name) for name in names}
+            store = CouncilStore(Path(temporary))
+            engine = CouncilEngine(
+                store=store,
+                providers=providers,
+                policy=RunPolicy(max_calls=20),
+                synthesis_provider="openai",
+            )
+
+            result = engine.run("Exercise the full seven-provider topology.")
+
+            self.assertEqual(result["status"], "completed")
+            self.assertEqual(result["completion_quality"], "clean")
+            self.assertEqual(len(result["proposals"]), 7)
+            self.assertEqual(
+                len([jury for jury in result["juries"] if jury["valid"]]),
+                7,
+            )
+            self.assertEqual(store.count_calls(result["run_id"]), 15)
+            self.assertEqual(result["workload"]["application_calls"], 15)
+            self.assertEqual(
+                result["workload"]["preflight"]["provider_count"],
+                7,
+            )
+            self.assertEqual(result["failures"], [])
+            self.assertEqual(result["recoveries"], [])
+
+    def test_seven_provider_topology_preserves_quorum_at_four_outages(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            unavailable = {"mistral", "xai", "qwen", "cohere"}
+            providers = {
+                name: FakeProvider(
+                    name,
+                    fail_stages=(
+                        {"proposal", "jury"}
+                        if name in unavailable
+                        else set()
+                    ),
+                )
+                for name in (
+                    "openai",
+                    "anthropic",
+                    "gemini",
+                    "mistral",
+                    "xai",
+                    "qwen",
+                    "cohere",
+                )
+            }
+            store = CouncilStore(Path(temporary))
+            engine = CouncilEngine(
+                store=store,
+                providers=providers,
+                policy=RunPolicy(max_calls=20),
+                synthesis_provider="openai",
+            )
+
+            result = engine.run("Exercise the seven-provider quorum boundary.")
+
+            self.assertEqual(result["status"], "completed")
+            self.assertEqual(result["completion_quality"], "degraded")
+            self.assertEqual(len(result["proposals"]), 3)
+            self.assertEqual(
+                len([jury for jury in result["juries"] if jury["valid"]]),
+                3,
+            )
+            self.assertEqual(store.count_calls(result["run_id"]), 15)
+            self.assertEqual(len(result["failures"]), 8)
+            self.assertEqual(
+                {failure["provider"] for failure in result["failures"]},
+                unavailable,
+            )
+
     def test_incomplete_synthesis_never_marks_run_completed(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             engine, providers, store = self._engine(Path(temporary))
