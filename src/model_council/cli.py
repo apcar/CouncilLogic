@@ -351,6 +351,16 @@ def _markdown_export(
         "",
         result.get("answer") or "_No final synthesis was produced._",
         "",
+        "## Candidate namespace",
+        "",
+        "```json",
+        json.dumps(
+            result.get("candidate_namespace"),
+            indent=2,
+            sort_keys=True,
+        ),
+        "```",
+        "",
         "## Aggregate",
         "",
         "```json",
@@ -362,6 +372,22 @@ def _markdown_export(
     ]
     warnings = result.get("warnings") or []
     lines.extend([f"- {warning}" for warning in warnings] or ["- None"])
+    lines.extend(["", "## Recoveries", ""])
+    result_recoveries = result.get("recoveries") or []
+    if result_recoveries:
+        lines.extend(
+            [
+                "```json",
+                json.dumps(
+                    result_recoveries,
+                    indent=2,
+                    sort_keys=True,
+                ),
+                "```",
+            ]
+        )
+    else:
+        lines.append("_None._")
     lines.extend(["", "## Invocation record", ""])
     for invocation in invocations:
         lines.extend(

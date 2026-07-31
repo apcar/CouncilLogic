@@ -31,6 +31,7 @@ from model_council.providers.mistral import MistralProvider  # noqa: E402
 from model_council.providers.mock import MockProvider  # noqa: E402
 from model_council.providers.openai import OpenAIProvider  # noqa: E402
 from model_council.providers.xai import XAIProvider  # noqa: E402
+from model_council.protocol import structured_output_schema  # noqa: E402
 
 
 def config(
@@ -109,6 +110,18 @@ def client(
         sleep=(sleeps.append if sleeps is not None else lambda _: None),
         random_value=lambda: 0.5,
     )
+
+
+def schema_keys(value: object) -> set[str]:
+    keys: set[str] = set()
+    if isinstance(value, dict):
+        keys.update(str(key) for key in value)
+        for item in value.values():
+            keys.update(schema_keys(item))
+    elif isinstance(value, list):
+        for item in value:
+            keys.update(schema_keys(item))
+    return keys
 
 
 class ParsingTests(unittest.TestCase):
@@ -372,6 +385,56 @@ class ParsingTests(unittest.TestCase):
             "abstain",
             body["output_config"]["format"]["schema"]["required"],
         )
+
+    def test_anthropic_strips_only_unsupported_schema_constraints(
+        self,
+    ) -> None:
+        transport = SequenceTransport(
+            *[
+                response(
+                    200,
+                    {
+                        "id": f"msg_{stage}",
+                        "model": "claude-test",
+                        "content": [{"type": "text", "text": "{}"}],
+                        "stop_reason": "end_turn",
+                    },
+                )
+                for stage in ("proposal", "jury")
+            ]
+        )
+        provider = AnthropicProvider(
+            config("anthropic", "https://api.anthropic.com/v1/messages"),
+            "anthropic-secret",
+            client=client(transport),
+        )
+
+        for stage in ("proposal", "jury"):
+            provider.generate(
+                system_prompt="system",
+                user_prompt="question",
+                stage=stage,
+            )
+
+        for stage, request in zip(
+            ("proposal", "jury"), transport.requests, strict=True
+        ):
+            body = json.loads(request.data or b"{}")
+            schema = body["output_config"]["format"]["schema"]
+            self.assertTrue(
+                {"type", "properties", "required", "additionalProperties"}
+                <= set(schema)
+            )
+            self.assertTrue(
+                {"minLength", "maxLength", "maxItems"}
+                .isdisjoint(schema_keys(schema))
+            )
+            canonical = structured_output_schema(stage)
+            self.assertIsNotNone(canonical)
+            self.assertTrue(
+                {"minLength", "maxLength", "maxItems"}
+                & schema_keys(canonical)
+            )
 
     def test_gemini_generate_content_parsing(self) -> None:
         transport = SequenceTransport(

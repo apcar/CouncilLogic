@@ -17,6 +17,7 @@ from .protocol import (
     PROPOSAL_UNCERTAINTY_MAX_ITEMS,
     PROPOSAL_VERIFICATION_MAX_CHARS,
     PROPOSAL_VERIFICATION_MAX_ITEMS,
+    candidate_label,
     jury_prompts,
     proposal_prompts,
     synthesis_prompts,
@@ -74,9 +75,7 @@ def estimate_workload(
     """Project worst-case stage prompt growth before provider execution."""
 
     providers = tuple(provider_names)
-    labels = [
-        chr(ord("A") + index) for index in range(len(providers))
-    ]
+    labels = [candidate_label(index) for index in range(len(providers))]
     artifacts = {
         label: maximum_proposal_artifact(label) for label in labels
     }
@@ -87,16 +86,17 @@ def estimate_workload(
     aggregate = {
         "protocol_id": PROTOCOL_ID,
         "protocol_version": PROTOCOL_VERSION,
-        "winner": labels[0] if labels else None,
-        "outcome": "winner" if labels else "invalid",
+        "winner": None,
+        "outcome": "tie" if labels else "invalid",
         "consensus": "divided",
         "ranking": labels,
         "borda_points": {
-            label: len(labels) - index for index, label in enumerate(labels)
+            label: len(providers) * max(0, len(labels) - 1)
+            for label in labels
         },
-        "win_counts": {label: 1 for label in labels},
-        "tie": False,
-        "tied_candidates": [],
+        "win_counts": {label: len(providers) for label in labels},
+        "tie": bool(labels),
+        "tied_candidates": labels,
         "valid_judgments": len(providers),
         "counted_judgments": len(providers),
         "abstentions": 0,

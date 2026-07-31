@@ -237,6 +237,20 @@ class CouncilStoreTest(unittest.TestCase):
         self.assertEqual(self.store.count_calls(run_id), 2)
         self.assertEqual(self.store.list_invocations(run_id)[0]["status"], "running")
         self.assertEqual(self.store.list_invocations(run_id)[0]["call_count"], 2)
+        retry_events = [
+            event
+            for event in self.store.list_events(run_id)
+            if event["event_type"] == "provider_retry_started"
+        ]
+        self.assertEqual(len(retry_events), 1)
+        self.assertEqual(
+            retry_events[0]["payload"]["retry_call_count"],
+            2,
+        )
+        self.assertEqual(
+            retry_events[0]["payload"]["prior_failure"],
+            failure.to_dict(),
+        )
 
     def test_events_are_concurrent_and_reopen_cleanly(self) -> None:
         run_id = self.create_run(key="reopen")

@@ -307,8 +307,8 @@ CLI exit codes are:
 
 Do not treat a printed answer alone as success. Check both the process exit
 code and the persisted run status. Also inspect `completion_quality`: `clean`
-means the run completed with no provider failure or truncation recovery;
-`degraded` covers partial/failed runs and completed answers with such events.
+means the run completed with no provider failure or recovery; `degraded`
+covers partial/failed runs and completed answers with such events.
 
 ## Inspect, list, and export
 
@@ -347,6 +347,18 @@ provider, is marked ambiguous and is **not** automatically retried; this avoids
 silently duplicating a potentially billable request. Start a new run only
 after reviewing the provider logs and deciding that another call is
 appropriate.
+
+Candidate membership and its blinded label namespace are durably locked before
+the first jury dispatch. Once jury quorum exists, the ordered adjudication
+record is durably locked before synthesis dispatch. Resume reuses those locks
+instead of admitting newly recovered proposal or jury members into an
+already-persisted downstream prompt, and rejects missing, duplicate, or
+inconsistent lock records.
+
+Before a non-ambiguous failed logical slot is restarted, its prior failure is
+atomically preserved in the audit log. The final result and Markdown export
+report each application-level retry as recovered, failed, ambiguous, or still
+in progress; a recovered retry therefore remains `completion_quality=degraded`.
 
 Resume refuses a run when the protocol hash or the
 provider/model/lineage/endpoint lock differs from the current application.

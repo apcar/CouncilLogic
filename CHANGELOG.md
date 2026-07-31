@@ -17,6 +17,30 @@ All notable public changes to CouncilLogic are recorded here.
 
 ### Changed
 
+- Anthropic structured-output requests now remove provider-unsupported length
+  and item-count schema constraints at the adapter boundary while retaining the
+  canonical bounded schema and local artifact validation.
+- Blinded candidates now use one durably locked, run-scoped randomized
+  namespace of unambiguous opaque labels, with a separate deterministic
+  presentation order per juror and the same namespace reused for synthesis.
+  This freezes downstream membership across resume and prevents
+  protocol-created cross-juror label collisions without weakening blinding.
+- Candidate membership and ordered adjudication inputs are durably locked
+  before their downstream stages, so proposal or jury recovery cannot change
+  an already-persisted jury or synthesis prompt on resume. Partial Markdown
+  exports now expose the locked candidate namespace even without an aggregate.
+- Application-level retries now preserve the prior provider failure atomically
+  before restarting an invocation and surface successful or failed retry
+  outcomes in the result, preventing recovered runs from being mislabeled
+  clean. Markdown exports include those derived recovery outcomes.
+- Workload synthesis bounds now model the larger all-candidate tie shape and
+  maximum score widths, preventing a boundary preflight pass from becoming a
+  runtime prompt-budget failure.
+- Proposal instructions now set concise target lengths below the schema's hard
+  bounds and state field-specific item limits so constrained models do not pad,
+  overfill, or corrupt artifacts at provider-relaxed schema limits. Local
+  validation also bounds JSON-escaped string size and rejects unpaired
+  surrogates before artifacts can exceed planned downstream prompts.
 - Proposal responses are locally validated, size-bounded JSON artifacts.
   Juries consume those artifacts, and synthesis consumes bounded candidates
   plus compact vote records instead of every jury rationale.

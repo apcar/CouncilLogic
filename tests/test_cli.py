@@ -13,7 +13,7 @@ import unittest
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
-from model_council.cli import main  # noqa: E402
+from model_council.cli import _markdown_export, main  # noqa: E402
 from model_council.store import CouncilStore  # noqa: E402
 
 
@@ -57,6 +57,14 @@ class CliTests(unittest.TestCase):
             result = json.loads(output)
             self.assertEqual(result["status"], "completed")
             self.assertEqual(len(result["proposals"]), 4)
+            self.assertEqual(
+                set(
+                    result["aggregate"][
+                        "candidate_label_mapping"
+                    ].values()
+                ),
+                {"mock-1", "mock-2", "mock-3", "mock-4"},
+            )
             run_id = result["run_id"]
 
             code, output, error = self._call(
@@ -95,7 +103,35 @@ class CliTests(unittest.TestCase):
             self.assertIn("- Completion quality: `clean`", exported)
             self.assertIn("## Council answer", exported)
             self.assertIn("## Recovery audit events", exported)
+            self.assertIn('"candidate_label_mapping"', exported)
             self.assertEqual(stat.S_IMODE(export_path.stat().st_mode), 0o600)
+
+            json_export_path = Path(temporary) / "council-export.json"
+            code, _output, error = self._call(
+                [
+                    *common,
+                    "export",
+                    run_id,
+                    "--format",
+                    "json",
+                    "--output",
+                    str(json_export_path),
+                ]
+            )
+            self.assertEqual(code, 0, error)
+            json_export = json.loads(
+                json_export_path.read_text(encoding="utf-8")
+            )
+            self.assertEqual(
+                json_export["run"]["result"]["aggregate"][
+                    "candidate_label_mapping"
+                ],
+                result["aggregate"]["candidate_label_mapping"],
+            )
+            self.assertEqual(
+                stat.S_IMODE(json_export_path.stat().st_mode),
+                0o600,
+            )
 
     def test_live_doctor_reports_missing_credentials_without_values(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -124,6 +160,48 @@ class CliTests(unittest.TestCase):
             self.assertFalse(payload["ready"])
             self.assertNotIn("sensitive", output.lower())
             self.assertEqual(CouncilStore(temporary).list_runs(), [])
+
+    def test_partial_markdown_preserves_candidate_namespace(self) -> None:
+        mapping = {
+            "CANDIDATE_01": "alpha",
+            "CANDIDATE_02": "beta",
+        }
+        rendered = _markdown_export(
+            {
+                "id": "partial-run",
+                "status": "partial",
+                "protocol_id": "independent-jury",
+                "protocol_version": "test",
+                "protocol_hash": "test-hash",
+                "question": "Question",
+                "result": {
+                    "completion_quality": "degraded",
+                    "answer": None,
+                    "aggregate": None,
+                    "candidate_namespace": {
+                        "candidate_label_mapping": mapping,
+                    },
+                    "recoveries": [
+                        {
+                            "kind": "application_retry",
+                            "stage": "jury",
+                            "provider": "alpha",
+                            "status": "recovered",
+                        }
+                    ],
+                    "warnings": [],
+                },
+            },
+            [],
+            [],
+        )
+
+        self.assertIn("## Candidate namespace", rendered)
+        self.assertIn('"CANDIDATE_01": "alpha"', rendered)
+        self.assertIn("## Aggregate\n\n```json\nnull", rendered)
+        self.assertIn("## Recoveries", rendered)
+        self.assertIn('"kind": "application_retry"', rendered)
+        self.assertIn('"status": "recovered"', rendered)
 
 
 if __name__ == "__main__":

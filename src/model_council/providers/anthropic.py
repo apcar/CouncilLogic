@@ -16,6 +16,25 @@ from .base import Provider
 from .http import JsonHttpClient, JsonResponse
 
 
+_UNSUPPORTED_STRUCTURED_OUTPUT_CONSTRAINTS = frozenset(
+    {"minLength", "maxLength", "maxItems"}
+)
+
+
+def _anthropic_schema(value: Any) -> Any:
+    """Remove bounds Anthropic rejects while preserving local validation."""
+
+    if isinstance(value, dict):
+        return {
+            key: _anthropic_schema(item)
+            for key, item in value.items()
+            if key not in _UNSUPPORTED_STRUCTURED_OUTPUT_CONSTRAINTS
+        }
+    if isinstance(value, list):
+        return [_anthropic_schema(item) for item in value]
+    return value
+
+
 def _integer(value: Any) -> int | None:
     return value if isinstance(value, int) and not isinstance(value, bool) else None
 
@@ -67,7 +86,7 @@ class AnthropicProvider(Provider):
             payload["output_config"] = {
                 "format": {
                     "type": "json_schema",
-                    "schema": output_schema,
+                    "schema": _anthropic_schema(output_schema),
                 }
             }
         if "temperature" in self.config.extra:

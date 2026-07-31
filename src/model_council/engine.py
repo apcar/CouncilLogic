@@ -18,6 +18,7 @@ from .protocol import (
     PROTOCOL_ID,
     PROTOCOL_VERSION,
     aggregate_juries,
+    candidate_label,
     jury_prompts,
     parse_jury,
     parse_proposal,
@@ -33,6 +34,13 @@ from .workload import (
     estimate_workload,
     require_workload_within_limits,
 )
+
+
+_CANDIDATE_NAMESPACE_EVENT = "candidate_namespace_locked"
+_CANDIDATE_NAMESPACE_VERSION = 1
+_ADJUDICATION_EVENT = "adjudication_locked"
+_ADJUDICATION_VERSION = 1
+_PROVIDER_RETRY_EVENT = "provider_retry_started"
 
 
 class CallLease(Protocol):
@@ -135,6 +143,15 @@ class CouncilEngine:
             raise ValueError("Protocol hash differs from the immutable run lock")
         self._validate_provider_lock(run["provider_configs"])
         self._validate_policy_lock(run["policy"])
+        existing_events = self.store.list_events(run_id)
+        namespace_lock = self._load_candidate_namespace_lock(
+            run_id, existing_events
+        )
+        adjudication_lock = self._load_adjudication_lock(
+            run_id,
+            namespace_lock,
+            existing_events,
+        )
         if run.get("status") == "completed" and run.get("result"):
             return run["result"]
 
@@ -163,13 +180,26 @@ class CouncilEngine:
         warnings: list[str] = []
         recoveries: list[dict[str, Any]] = [
             dict(event["payload"])
-            for event in self.store.list_events(run_id)
+            for event in existing_events
             if event["event_type"] == "truncation_recovery"
         ]
+        if namespace_lock is None:
+            candidate_mapping: dict[str, str] | None = None
+            proposal_provider_names = list(self.providers)
+        else:
+            candidate_mapping = dict(
+                namespace_lock["candidate_label_mapping"]
+            )
+            proposal_provider_names = list(candidate_mapping.values())
+            failures.extend(
+                dict(failure)
+                for failure in namespace_lock["proposal_failures"]
+            )
 
         proposal_system, proposal_user = proposal_prompts(question)
         proposal_prompts_by_provider = {
-            name: (proposal_system, proposal_user) for name in self.providers
+            name: (proposal_system, proposal_user)
+            for name in proposal_provider_names
         }
         proposals, proposal_failures, proposal_recoveries = (
             self._run_parallel_stage(
@@ -205,6 +235,14 @@ class CouncilEngine:
                 )
                 proposals.pop(provider_name)
 
+        if candidate_mapping is not None and set(proposals) != set(
+            candidate_mapping.values()
+        ):
+            raise ValueError(
+                "Frozen candidate membership could not be recovered "
+                "from successful proposal records"
+            )
+
         proposal_lineages = {
             self.providers[name].config.lineage for name in proposals
         }
@@ -239,55 +277,79 @@ class CouncilEngine:
                 warnings=warnings,
                 recoveries=recoveries,
                 workload_plan=workload_plan,
+                candidate_mapping=None,
             )
             return self._finish(run_id, result)
 
-        jury_prompts_by_provider: dict[str, tuple[str, str]] = {}
-        jury_mappings: dict[str, dict[str, str]] = {}
-        for juror_name in self.providers:
-            mapping = self._jury_mapping(run_id, juror_name, list(proposals))
-            candidates = {
-                label: proposal_artifacts[provider_name]
-                for label, provider_name in mapping.items()
-            }
-            jury_mappings[juror_name] = mapping
-            jury_prompts_by_provider[juror_name] = jury_prompts(question, candidates)
-
-        jury_responses, jury_failures, jury_recoveries = (
-            self._run_parallel_stage(
-                run_id=run_id,
-                stage="jury",
-                prompts=jury_prompts_by_provider,
-                deadline=deadline,
+        if candidate_mapping is None:
+            candidate_mapping = self._candidate_mapping(
+                run_id, list(proposals)
             )
-        )
-        failures.extend(jury_failures)
-        recoveries.extend(jury_recoveries)
+            namespace_lock = self._lock_candidate_namespace(
+                run_id,
+                candidate_mapping,
+                failures,
+            )
+            candidate_mapping = dict(
+                namespace_lock["candidate_label_mapping"]
+            )
+        if adjudication_lock is None:
+            jury_prompts_by_provider: dict[str, tuple[str, str]] = {}
+            jury_presentation_orders: dict[str, list[str]] = {}
+            for juror_name in self.providers:
+                presentation_order = self._jury_presentation_order(
+                    run_id, juror_name, list(candidate_mapping)
+                )
+                candidates = {
+                    label: proposal_artifacts[candidate_mapping[label]]
+                    for label in presentation_order
+                }
+                jury_presentation_orders[juror_name] = presentation_order
+                jury_prompts_by_provider[juror_name] = jury_prompts(
+                    question, candidates
+                )
 
-        jury_records: list[dict[str, Any]] = []
-        for juror_name, response in jury_responses.items():
-            mapping = jury_mappings[juror_name]
-            try:
-                parsed = parse_jury(response.content, list(mapping))
-                canonical = self._canonicalize_jury(parsed, mapping)
-                canonical.update(
-                    {
+            jury_responses, jury_failures, jury_recoveries = (
+                self._run_parallel_stage(
+                    run_id=run_id,
+                    stage="jury",
+                    prompts=jury_prompts_by_provider,
+                    deadline=deadline,
+                )
+            )
+            failures.extend(jury_failures)
+            recoveries.extend(jury_recoveries)
+            jury_stage_failures = list(jury_failures)
+
+            jury_records: list[dict[str, Any]] = []
+            for juror_name, response in jury_responses.items():
+                presentation_order = jury_presentation_orders[juror_name]
+                try:
+                    parsed = parse_jury(
+                        response.content, list(candidate_mapping)
+                    )
+                    canonical = self._canonicalize_jury(
+                        parsed, candidate_mapping
+                    )
+                    canonical.update(
+                        {
+                            "juror": juror_name,
+                            "juror_model": response.resolved_model,
+                            "mapping": candidate_mapping,
+                            "presentation_order": presentation_order,
+                            "valid": True,
+                        }
+                    )
+                except (TypeError, ValueError) as exc:
+                    canonical = {
                         "juror": juror_name,
                         "juror_model": response.resolved_model,
-                        "mapping": mapping,
-                        "valid": True,
+                        "mapping": candidate_mapping,
+                        "presentation_order": presentation_order,
+                        "valid": False,
+                        "error": str(exc),
                     }
-                )
-            except (TypeError, ValueError) as exc:
-                canonical = {
-                    "juror": juror_name,
-                    "juror_model": response.resolved_model,
-                    "mapping": mapping,
-                    "valid": False,
-                    "error": str(exc),
-                }
-                failures.append(
-                    self._failure_payload(
+                    failure = self._failure_payload(
                         "jury",
                         juror_name,
                         ProviderError(
@@ -299,51 +361,74 @@ class CouncilEngine:
                             ambiguous=False,
                         ),
                     )
-                )
-            jury_records.append(canonical)
+                    failures.append(failure)
+                    jury_stage_failures.append(failure)
+                jury_records.append(canonical)
 
-        valid_juries = [jury for jury in jury_records if jury.get("valid")]
-        if len(valid_juries) < self.policy.jury_quorum:
-            warnings.append(
-                f"Jury quorum not met: {len(valid_juries)}/{self.policy.jury_quorum}"
-            )
-            result = self._build_result(
-                run_id=run_id,
-                question=question,
-                status="partial",
-                answer=None,
-                proposals=proposals,
-                proposal_artifacts=proposal_artifacts,
-                jury_records=jury_records,
-                aggregate=None,
-                failures=failures,
-                warnings=warnings,
-                recoveries=recoveries,
-                workload_plan=workload_plan,
-            )
-            return self._finish(run_id, result)
+            valid_juries = [
+                jury for jury in jury_records if jury.get("valid")
+            ]
+            if len(valid_juries) < self.policy.jury_quorum:
+                warnings.append(
+                    "Jury quorum not met: "
+                    f"{len(valid_juries)}/{self.policy.jury_quorum}"
+                )
+                result = self._build_result(
+                    run_id=run_id,
+                    question=question,
+                    status="partial",
+                    answer=None,
+                    proposals=proposals,
+                    proposal_artifacts=proposal_artifacts,
+                    jury_records=jury_records,
+                    aggregate=None,
+                    failures=failures,
+                    warnings=warnings,
+                    recoveries=recoveries,
+                    workload_plan=workload_plan,
+                    candidate_mapping=candidate_mapping,
+                )
+                return self._finish(run_id, result)
+        else:
+            jury_records = [
+                dict(jury)
+                for jury in adjudication_lock["jury_records"]
+            ]
+            jury_stage_failures = [
+                dict(failure)
+                for failure in adjudication_lock["jury_failures"]
+            ]
+            failures.extend(jury_stage_failures)
+            valid_juries = [
+                jury for jury in jury_records if jury.get("valid")
+            ]
 
         aggregate = aggregate_juries(
             [self._judgment_payload(jury) for jury in valid_juries],
             list(proposals),
         )
+        aggregate["candidate_label_mapping"] = dict(candidate_mapping)
+        if adjudication_lock is None:
+            adjudication_lock = self._lock_adjudication(
+                run_id,
+                candidate_mapping,
+                jury_records,
+                jury_stage_failures,
+            )
 
         answer: str | None = None
         if time.monotonic() < deadline:
             synthesis_name = self.synthesis_provider
-            synth_mapping = {
-                chr(ord("A") + index): provider_name
-                for index, provider_name in enumerate(sorted(proposals))
-            }
             synth_candidates = {
                 label: proposal_artifacts[provider_name]
-                for label, provider_name in synth_mapping.items()
+                for label, provider_name in candidate_mapping.items()
             }
             anonymous_aggregate = self._anonymize_aggregate(
-                aggregate, synth_mapping
+                aggregate, candidate_mapping
             )
             anonymous_juries = [
-                self._anonymize_jury(jury, synth_mapping) for jury in valid_juries
+                self._anonymize_jury(jury, candidate_mapping)
+                for jury in valid_juries
             ]
             synth_system, synth_user = synthesis_prompts(
                 question,
@@ -380,6 +465,7 @@ class CouncilEngine:
             warnings=warnings,
             recoveries=recoveries,
             workload_plan=workload_plan,
+            candidate_mapping=candidate_mapping,
         )
         return self._finish(run_id, result)
 
@@ -406,6 +492,21 @@ class CouncilEngine:
             (record["stage"], record["provider"]): record
             for record in self.store.list_invocations(run_id)
         }
+        truncation_retry_counts: dict[str, int] = {}
+        for event in self.store.list_events(run_id):
+            if event["event_type"] != _PROVIDER_RETRY_EVENT:
+                continue
+            payload = event.get("payload")
+            if (
+                isinstance(payload, dict)
+                and payload.get("stage") == stage
+                and payload.get("retry_kind") == "truncation"
+                and isinstance(payload.get("provider"), str)
+            ):
+                provider_name = str(payload["provider"])
+                truncation_retry_counts[provider_name] = (
+                    truncation_retry_counts.get(provider_name, 0) + 1
+                )
         ambiguous_providers = {
             str(record["provider"])
             for record in existing_records.values()
@@ -459,8 +560,8 @@ class CouncilEngine:
             if (
                 record
                 and self._is_length_failure_record(record)
-                and int(record.get("call_count") or 1)
-                >= 1 + self.policy.truncation_retries
+                and truncation_retry_counts.get(provider_name, 0)
+                >= self.policy.truncation_retries
             ):
                 exhausted = ProviderError(
                     "Known output-length recovery is exhausted; "
@@ -710,6 +811,10 @@ class CouncilEngine:
                         and allow_truncation_recovery
                         and self.policy.truncation_retries
                         and provider_name not in prior_truncations
+                        and truncation_retry_counts.get(
+                            provider_name, 0
+                        )
+                        < self.policy.truncation_retries
                     ):
                         self.store.append_event(
                             run_id,
@@ -898,19 +1003,417 @@ class CouncilEngine:
             )
 
     @staticmethod
-    def _jury_mapping(
-        run_id: str, juror_name: str, provider_names: list[str]
+    def _candidate_mapping(
+        run_id: str, provider_names: list[str]
     ) -> dict[str, str]:
         seed_bytes = hashlib.sha256(
-            f"{run_id}:{juror_name}:jury-order-v1".encode()
+            f"{run_id}:candidate-label-map-v1".encode()
         ).digest()
         rng = random.Random(int.from_bytes(seed_bytes[:8], "big"))
-        shuffled = list(provider_names)
+        shuffled = sorted(provider_names)
         rng.shuffle(shuffled)
         return {
-            chr(ord("A") + index): provider_name
+            candidate_label(index): provider_name
             for index, provider_name in enumerate(shuffled)
         }
+
+    def _load_candidate_namespace_lock(
+        self,
+        run_id: str,
+        events: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any] | None:
+        matching = [
+            event
+            for event in (
+                self.store.list_events(run_id)
+                if events is None
+                else events
+            )
+            if event["event_type"] == _CANDIDATE_NAMESPACE_EVENT
+        ]
+        if not matching:
+            return None
+        if len(matching) != 1:
+            raise ValueError(
+                "Run contains duplicate candidate namespace locks"
+            )
+        payload = matching[0].get("payload")
+        if not isinstance(payload, dict) or set(payload) != {
+            "version",
+            "candidate_label_mapping",
+            "proposal_failures",
+        }:
+            raise ValueError("Candidate namespace lock is malformed")
+        if payload["version"] != _CANDIDATE_NAMESPACE_VERSION:
+            raise ValueError("Candidate namespace lock version is unsupported")
+
+        raw_mapping = payload["candidate_label_mapping"]
+        if not isinstance(raw_mapping, dict) or not raw_mapping:
+            raise ValueError("Candidate namespace mapping is malformed")
+        if any(
+            not isinstance(label, str)
+            or not isinstance(provider, str)
+            for label, provider in raw_mapping.items()
+        ):
+            raise ValueError("Candidate namespace mapping is malformed")
+        expected_labels = [
+            candidate_label(index) for index in range(len(raw_mapping))
+        ]
+        if set(raw_mapping) != set(expected_labels):
+            raise ValueError("Candidate namespace labels are malformed")
+        mapping = {
+            label: raw_mapping[label] for label in expected_labels
+        }
+        selected_providers = set(mapping.values())
+        if (
+            len(selected_providers) != len(mapping)
+            or not selected_providers <= set(self.providers)
+            or mapping
+            != self._candidate_mapping(run_id, list(selected_providers))
+        ):
+            raise ValueError("Candidate namespace mapping is inconsistent")
+        selected_lineages = {
+            self.providers[name].config.lineage
+            for name in selected_providers
+        }
+        if (
+            len(selected_providers) < self.policy.proposal_quorum
+            or len(selected_lineages) < self.policy.min_lineages
+        ):
+            raise ValueError("Candidate namespace does not satisfy quorum")
+
+        raw_failures = payload["proposal_failures"]
+        if not isinstance(raw_failures, list) or any(
+            not isinstance(failure, dict) for failure in raw_failures
+        ):
+            raise ValueError("Frozen proposal failures are malformed")
+        failures = [dict(failure) for failure in raw_failures]
+        if any(
+            failure.get("stage") != "proposal"
+            or failure.get("provider") not in self.providers
+            for failure in failures
+        ):
+            raise ValueError("Frozen proposal failures are inconsistent")
+        failed_providers = {
+            str(failure["provider"]) for failure in failures
+        }
+        if (
+            failed_providers & selected_providers
+            or failed_providers
+            != set(self.providers) - selected_providers
+        ):
+            raise ValueError("Frozen proposal membership is inconsistent")
+        return {
+            "version": _CANDIDATE_NAMESPACE_VERSION,
+            "candidate_label_mapping": mapping,
+            "proposal_failures": failures,
+        }
+
+    def _lock_candidate_namespace(
+        self,
+        run_id: str,
+        mapping: dict[str, str],
+        proposal_failures: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        self.store.append_event(
+            run_id,
+            _CANDIDATE_NAMESPACE_EVENT,
+            {
+                "version": _CANDIDATE_NAMESPACE_VERSION,
+                "candidate_label_mapping": dict(mapping),
+                "proposal_failures": [
+                    dict(failure) for failure in proposal_failures
+                ],
+            },
+        )
+        locked = self._load_candidate_namespace_lock(run_id)
+        assert locked is not None
+        return locked
+
+    def _load_adjudication_lock(
+        self,
+        run_id: str,
+        namespace_lock: dict[str, Any] | None,
+        events: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any] | None:
+        matching = [
+            event
+            for event in (
+                self.store.list_events(run_id)
+                if events is None
+                else events
+            )
+            if event["event_type"] == _ADJUDICATION_EVENT
+        ]
+        if not matching:
+            return None
+        if namespace_lock is None:
+            raise ValueError(
+                "Adjudication lock exists without a candidate namespace"
+            )
+        if len(matching) != 1:
+            raise ValueError("Run contains duplicate adjudication locks")
+        payload = matching[0].get("payload")
+        if not isinstance(payload, dict) or set(payload) != {
+            "version",
+            "candidate_label_mapping",
+            "jury_records",
+            "jury_failures",
+        }:
+            raise ValueError("Adjudication lock is malformed")
+        if payload["version"] != _ADJUDICATION_VERSION:
+            raise ValueError("Adjudication lock version is unsupported")
+
+        mapping = namespace_lock["candidate_label_mapping"]
+        if payload["candidate_label_mapping"] != mapping:
+            raise ValueError(
+                "Adjudication lock candidate namespace is inconsistent"
+            )
+        raw_records = payload["jury_records"]
+        if not isinstance(raw_records, list) or any(
+            not isinstance(record, dict) for record in raw_records
+        ):
+            raise ValueError("Locked jury records are malformed")
+        jury_records = [dict(record) for record in raw_records]
+        record_jurors: set[str] = set()
+        for record in jury_records:
+            juror = record.get("juror")
+            presentation_order = record.get("presentation_order")
+            if (
+                not isinstance(juror, str)
+                or juror not in self.providers
+                or juror in record_jurors
+                or record.get("mapping") != mapping
+                or not isinstance(presentation_order, list)
+                or len(presentation_order) != len(mapping)
+                or set(presentation_order) != set(mapping)
+                or not isinstance(record.get("valid"), bool)
+            ):
+                raise ValueError("Locked jury records are inconsistent")
+            record_jurors.add(juror)
+
+        raw_failures = payload["jury_failures"]
+        if not isinstance(raw_failures, list) or any(
+            not isinstance(failure, dict) for failure in raw_failures
+        ):
+            raise ValueError("Locked jury failures are malformed")
+        jury_failures = [dict(failure) for failure in raw_failures]
+        if any(
+            failure.get("stage") != "jury"
+            or failure.get("provider") not in self.providers
+            for failure in jury_failures
+        ):
+            raise ValueError("Locked jury failures are inconsistent")
+        failed_jurors = {
+            str(failure["provider"]) for failure in jury_failures
+        }
+        valid_jurors = {
+            str(record["juror"])
+            for record in jury_records
+            if record["valid"]
+        }
+        invalid_jurors = record_jurors - valid_jurors
+        if (
+            valid_jurors & failed_jurors
+            or invalid_jurors - failed_jurors
+            or record_jurors | failed_jurors != set(self.providers)
+            or len(valid_jurors) < self.policy.jury_quorum
+        ):
+            raise ValueError("Locked jury membership is inconsistent")
+        try:
+            aggregate_juries(
+                [
+                    self._judgment_payload(record)
+                    for record in jury_records
+                    if record["valid"]
+                ],
+                list(mapping.values()),
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError(
+                "Locked jury judgments are inconsistent"
+            ) from exc
+        return {
+            "version": _ADJUDICATION_VERSION,
+            "candidate_label_mapping": dict(mapping),
+            "jury_records": jury_records,
+            "jury_failures": jury_failures,
+        }
+
+    def _lock_adjudication(
+        self,
+        run_id: str,
+        mapping: dict[str, str],
+        jury_records: list[dict[str, Any]],
+        jury_failures: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        self.store.append_event(
+            run_id,
+            _ADJUDICATION_EVENT,
+            {
+                "version": _ADJUDICATION_VERSION,
+                "candidate_label_mapping": dict(mapping),
+                "jury_records": [dict(record) for record in jury_records],
+                "jury_failures": [
+                    dict(failure) for failure in jury_failures
+                ],
+            },
+        )
+        namespace_lock = self._load_candidate_namespace_lock(run_id)
+        locked = self._load_adjudication_lock(
+            run_id, namespace_lock
+        )
+        assert locked is not None
+        return locked
+
+    def _provider_retry_recoveries(
+        self,
+        run_id: str,
+        invocations: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        grouped: dict[
+            tuple[str, str], list[dict[str, Any]]
+        ] = {}
+        seen_slots: set[tuple[str, str, int]] = set()
+        all_events = self.store.list_events(run_id)
+        completed_truncation_slots = {
+            (
+                str(event["payload"].get("stage")),
+                str(event["payload"].get("provider")),
+            )
+            for event in all_events
+            if event["event_type"] == "truncation_recovery"
+            and isinstance(event.get("payload"), dict)
+        }
+        for event in all_events:
+            if event["event_type"] != _PROVIDER_RETRY_EVENT:
+                continue
+            payload = event.get("payload")
+            if not isinstance(payload, dict) or set(payload) != {
+                "stage",
+                "provider",
+                "retry_call_count",
+                "retry_kind",
+                "prior_failure",
+            }:
+                raise ValueError("Provider retry audit event is malformed")
+            stage = payload["stage"]
+            provider = payload["provider"]
+            retry_call_count = payload["retry_call_count"]
+            prior_failure = payload["prior_failure"]
+            if (
+                not isinstance(stage, str)
+                or not isinstance(provider, str)
+                or provider not in self.providers
+                or not isinstance(retry_call_count, int)
+                or isinstance(retry_call_count, bool)
+                or retry_call_count < 2
+                or payload["retry_kind"]
+                not in {"application", "truncation"}
+                or not isinstance(prior_failure, dict)
+            ):
+                raise ValueError(
+                    "Provider retry audit event is inconsistent"
+                )
+            slot = (stage, provider, retry_call_count)
+            if slot in seen_slots:
+                raise ValueError(
+                    "Provider retry audit event is duplicated"
+                )
+            seen_slots.add(slot)
+            grouped.setdefault((stage, provider), []).append(
+                dict(payload)
+            )
+
+        invocation_by_slot = {
+            (str(invocation["stage"]), str(invocation["provider"])): invocation
+            for invocation in invocations
+        }
+        if any(
+            int(invocation.get("call_count") or 1) > 1
+            and slot not in grouped
+            for slot, invocation in invocation_by_slot.items()
+        ):
+            raise ValueError("Provider retry audit is missing")
+        recoveries: list[dict[str, Any]] = []
+        for slot, retry_events in grouped.items():
+            retry_events.sort(
+                key=lambda event: int(event["retry_call_count"])
+            )
+            invocation = invocation_by_slot.get(slot)
+            if invocation is None:
+                raise ValueError(
+                    "Provider retry audit has no invocation record"
+                )
+            retry_counts = [
+                int(event["retry_call_count"])
+                for event in retry_events
+            ]
+            if retry_counts != list(
+                range(2, int(invocation["call_count"]) + 1)
+            ):
+                raise ValueError(
+                    "Provider retry audit is incomplete"
+                )
+            for index, retry_event in enumerate(retry_events):
+                is_truncation = (
+                    retry_event["retry_kind"] == "truncation"
+                )
+                if is_truncation and slot in completed_truncation_slots:
+                    continue
+                next_event = (
+                    retry_events[index + 1]
+                    if index + 1 < len(retry_events)
+                    else None
+                )
+                final_failure: dict[str, Any] | None = None
+                if next_event is not None:
+                    status = "failed"
+                    final_failure = dict(next_event["prior_failure"])
+                elif invocation["status"] == "succeeded":
+                    status = "recovered"
+                elif invocation["status"] == "failed":
+                    status = (
+                        "ambiguous"
+                        if invocation.get("error_ambiguous")
+                        else "failed"
+                    )
+                    if isinstance(invocation.get("error"), dict):
+                        final_failure = dict(invocation["error"])
+                else:
+                    status = "in_progress"
+                recovery = {
+                    "kind": (
+                        "truncation_retry"
+                        if is_truncation
+                        else "application_retry"
+                    ),
+                    "stage": retry_event["stage"],
+                    "provider": retry_event["provider"],
+                    "retry_call_count": retry_event[
+                        "retry_call_count"
+                    ],
+                    "status": status,
+                    "prior_failure": dict(
+                        retry_event["prior_failure"]
+                    ),
+                }
+                if final_failure is not None:
+                    recovery["final_failure"] = final_failure
+                recoveries.append(recovery)
+        return recoveries
+
+    @staticmethod
+    def _jury_presentation_order(
+        run_id: str, juror_name: str, candidate_labels: list[str]
+    ) -> list[str]:
+        seed_bytes = hashlib.sha256(
+            f"{run_id}:{juror_name}:jury-presentation-v1".encode()
+        ).digest()
+        rng = random.Random(int.from_bytes(seed_bytes[:8], "big"))
+        order = sorted(candidate_labels)
+        rng.shuffle(order)
+        return order
 
     @staticmethod
     def _canonicalize_jury(
@@ -930,6 +1433,7 @@ class CouncilEngine:
     ) -> dict[str, Any]:
         reverse = {provider: label for label, provider in mapping.items()}
         anonymous = dict(aggregate)
+        anonymous.pop("candidate_label_mapping", None)
         if aggregate.get("winner") in reverse:
             anonymous["winner"] = reverse[aggregate["winner"]]
         for field in ("ranking", "tied_candidates"):
@@ -1015,13 +1519,26 @@ class CouncilEngine:
         warnings: list[str],
         recoveries: list[dict[str, Any]],
         workload_plan: dict[str, Any],
+        candidate_mapping: dict[str, str] | None,
     ) -> dict[str, Any]:
+        invocations = self.store.list_invocations(run_id)
+        result_recoveries = [
+            *recoveries,
+            *self._provider_retry_recoveries(
+                run_id,
+                invocations,
+            ),
+        ]
         valid_jury_count = sum(
             1 for jury in jury_records if jury.get("valid")
         )
         completion_quality = (
             "clean"
-            if status == "completed" and not failures and not recoveries
+            if (
+                status == "completed"
+                and not failures
+                and not result_recoveries
+            )
             else "degraded"
         )
         result_warnings = list(warnings)
@@ -1031,7 +1548,7 @@ class CouncilEngine:
                 "inspect failures and recoveries."
             )
         actual_stage_prompt_chars: dict[str, int] = {}
-        for invocation in self.store.list_invocations(run_id):
+        for invocation in invocations:
             prompt_chars = len(invocation.get("prompt_text") or "")
             stage = str(invocation["stage"])
             actual_stage_prompt_chars[stage] = max(
@@ -1050,6 +1567,13 @@ class CouncilEngine:
             "question_sha256": hashlib.sha256(question.encode()).hexdigest(),
             "answer": answer,
             "aggregate": aggregate,
+            "candidate_namespace": (
+                None
+                if candidate_mapping is None
+                else {
+                    "candidate_label_mapping": dict(candidate_mapping),
+                }
+            ),
             "proposals": [
                 {
                     "provider": name,
@@ -1062,7 +1586,7 @@ class CouncilEngine:
             ],
             "juries": jury_records,
             "failures": failures,
-            "recoveries": recoveries,
+            "recoveries": result_recoveries,
             "warnings": result_warnings,
             "membership": {
                 "requested_providers": len(self.providers),
@@ -1071,8 +1595,12 @@ class CouncilEngine:
                 "provider_stage_failures": len(failures),
                 "recovered_truncations": sum(
                     1
-                    for recovery in recoveries
-                    if recovery.get("status") == "recovered"
+                    for recovery in result_recoveries
+                    if (
+                        recovery.get("status") == "recovered"
+                        and recovery.get("kind")
+                        != "application_retry"
+                    )
                 ),
             },
             "workload": {

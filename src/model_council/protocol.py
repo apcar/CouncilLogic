@@ -15,7 +15,8 @@ from typing import Any
 
 
 PROTOCOL_ID = "independent-jury"
-PROTOCOL_VERSION = "1.1.0-beta"
+PROTOCOL_VERSION = "1.1.1-beta"
+CANDIDATE_LABEL_PREFIX = "CANDIDATE_"
 
 PROPOSAL_OUTCOME_MAX_CHARS = 600
 PROPOSAL_REASON_MAX_ITEMS = 4
@@ -54,7 +55,12 @@ these keys:
 }
 
 Keep every field concise and complete. Prioritize a valid finished object over
-additional detail. Do not add keys. Do not force certainty."""
+additional detail. Aim for no more than 400 characters in outcome, 220
+characters per evidence_and_reasoning item, and 160 characters per uncertainty
+or verification_needed item. evidence_and_reasoning and verification_needed
+must contain at most four items each; uncertainty must contain at most three.
+The schema permits modest headroom; never pad a field to its hard limit. Do not
+add keys. Do not force certainty."""
 
 
 _PROPOSAL_USER_TEMPLATE = """\
@@ -101,6 +107,8 @@ Rules:
 - material_disagreements and verification_needed must be JSON arrays of
   non-empty strings. Empty arrays are allowed.
 - rationale must be a concise non-empty string.
+- In free-text fields, refer to a candidate only by its exact full allowed
+  label. Never abbreviate, renumber, or reinterpret a candidate label.
 - Keep rationale under 700 characters, each array to at most four items, and
   each array item under 280 characters.
 - Do not add keys."""
@@ -173,6 +181,14 @@ _PROPOSAL_KEYS = frozenset(
 )
 _CONFIDENCE_VALUES = frozenset({"low", "medium", "high"})
 _CODE_FENCE_RE = re.compile(r"```(?:json)?\s*(.*?)```", re.IGNORECASE | re.DOTALL)
+
+
+def candidate_label(index: int) -> str:
+    """Return the protocol's unambiguous opaque label for one candidate."""
+
+    if not isinstance(index, int) or isinstance(index, bool) or index < 0:
+        raise ValueError("candidate label index must be a non-negative integer")
+    return f"{CANDIDATE_LABEL_PREFIX}{index + 1:02d}"
 
 
 def proposal_json_schema() -> dict[str, Any]:
@@ -487,6 +503,14 @@ def _string_list(
         raise ValueError(
             f"{field_name} items must be at most {max_chars} characters"
         )
+    if max_chars is not None and any(
+        _serialized_string_chars(item) > max_chars
+        for item in normalized
+    ):
+        raise ValueError(
+            f"{field_name} items must fit within {max_chars} "
+            "serialized JSON characters"
+        )
     if len(set(normalized)) != len(normalized):
         raise ValueError(f"{field_name} must not contain duplicates")
     return normalized
@@ -500,7 +524,22 @@ def _bounded_string(value: Any, field_name: str, max_chars: int) -> str:
         raise ValueError(
             f"{field_name} must be at most {max_chars} characters"
         )
+    if _serialized_string_chars(normalized) > max_chars:
+        raise ValueError(
+            f"{field_name} must fit within {max_chars} "
+            "serialized JSON characters"
+        )
     return normalized
+
+
+def _serialized_string_chars(value: str) -> int:
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise ValueError(
+            "text must not contain unpaired Unicode surrogates"
+        ) from exc
+    return len(json.dumps(value, ensure_ascii=False)) - 2
 
 
 def _validate_proposal_object(value: Mapping[str, Any]) -> dict[str, Any]:
@@ -776,6 +815,7 @@ def protocol_hash() -> str:
         {
             "id": PROTOCOL_ID,
             "version": PROTOCOL_VERSION,
+            "candidate_label_prefix": CANDIDATE_LABEL_PREFIX,
             "proposal_system": _PROPOSAL_SYSTEM_TEMPLATE,
             "proposal_user": _PROPOSAL_USER_TEMPLATE,
             "jury_system": _JURY_SYSTEM_TEMPLATE,
@@ -796,9 +836,11 @@ def protocol_hash() -> str:
 
 
 __all__ = [
+    "CANDIDATE_LABEL_PREFIX",
     "PROTOCOL_ID",
     "PROTOCOL_VERSION",
     "aggregate_juries",
+    "candidate_label",
     "jury_prompts",
     "jury_json_schema",
     "parse_jury",

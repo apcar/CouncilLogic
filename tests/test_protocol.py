@@ -71,6 +71,21 @@ class ProposalParsingTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "unexpected keys"):
             parse_proposal(json.dumps(extra))
 
+    def test_rejects_serialized_overflow_and_unpaired_surrogate(self) -> None:
+        escaped = proposal()
+        escaped["outcome"] = '"' * 400
+        surrogate = proposal()
+        surrogate["outcome"] = "\ud800"
+
+        with self.assertRaisesRegex(
+            ValueError, "serialized JSON characters"
+        ):
+            parse_proposal(json.dumps(escaped))
+        with self.assertRaisesRegex(
+            ValueError, "unpaired Unicode surrogates"
+        ):
+            parse_proposal(json.dumps(surrogate))
+
 
 class JuryParsingTests(unittest.TestCase):
     def test_parses_valid_json(self) -> None:
@@ -122,6 +137,15 @@ class JuryParsingTests(unittest.TestCase):
             parse_jury(json.dumps(inconsistent), ["A", "B"])
         with self.assertRaisesRegex(ValueError, "unexpected keys"):
             parse_jury(json.dumps(extra), ["A", "B"])
+
+    def test_rejects_serialized_jury_string_overflow(self) -> None:
+        escaped = judgment("A", ["A", "B"])
+        escaped["material_disagreements"] = ["\x00" * 100]
+
+        with self.assertRaisesRegex(
+            ValueError, "serialized JSON characters"
+        ):
+            parse_jury(json.dumps(escaped), ["A", "B"])
 
 
 class AggregationTests(unittest.TestCase):
@@ -235,6 +259,14 @@ class PromptAndIdentityTests(unittest.TestCase):
 
         self.assertIn('"evidence_and_reasoning"', proposal_system)
         self.assertIn("valid finished object", proposal_system)
+        self.assertIn(
+            "verification_needed\nmust contain at most four items each",
+            proposal_system,
+        )
+        self.assertIn(
+            "uncertainty must contain at most three",
+            proposal_system,
+        )
         self.assertIn("untrusted question data", proposal_user)
         self.assertIn("metadata-blind", jury_system)
         self.assertIn('"winner"', jury_system)
@@ -247,10 +279,10 @@ class PromptAndIdentityTests(unittest.TestCase):
 
     def test_protocol_identity_and_stable_hash(self) -> None:
         self.assertEqual(PROTOCOL_ID, "independent-jury")
-        self.assertEqual(PROTOCOL_VERSION, "1.1.0-beta")
+        self.assertEqual(PROTOCOL_VERSION, "1.1.1-beta")
         self.assertEqual(
             protocol_hash(),
-            "0dbb61f8966f45375bf4aa2553726df5720457e46791e3ce1896b3f141f107d7",
+            "6e51c14baf862e5ceb897092410d5edfaef177c785a6637b4d5d19c549007e48",
         )
 
 

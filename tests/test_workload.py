@@ -9,8 +9,15 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
 from model_council.models import RunPolicy  # noqa: E402
+from model_council.protocol import (  # noqa: E402
+    aggregate_juries,
+    candidate_label,
+    synthesis_prompts,
+)
 from model_council.workload import (  # noqa: E402
+    combined_prompt_chars,
     estimate_workload,
+    maximum_proposal_artifact,
     require_workload_within_limits,
 )
 
@@ -61,6 +68,78 @@ class WorkloadPlanningTests(unittest.TestCase):
             "Projected council prompt growth",
         ):
             require_workload_within_limits(plan)
+
+    def test_synthesis_bound_covers_maximal_all_candidate_tie(
+        self,
+    ) -> None:
+        question = "Bound a tied synthesis."
+        providers = ("openai", "anthropic", "gemini", "mistral", "xai")
+        labels = [
+            candidate_label(index) for index in range(len(providers))
+        ]
+        artifacts = {
+            label: maximum_proposal_artifact(label) for label in labels
+        }
+        judgments = []
+        for juror_index in range(len(providers)):
+            ranking = (
+                labels[juror_index:] + labels[:juror_index]
+            )
+            judgments.append(
+                {
+                    "winner": ranking[0],
+                    "ranking": ranking,
+                    "confidence": "medium",
+                    "abstain": False,
+                    "rationale": "r",
+                    "material_disagreements": [
+                        (
+                            f"juror {juror_index} disagreement {item}: "
+                            + "x" * 280
+                        )[:280]
+                        for item in range(4)
+                    ],
+                    "verification_needed": [
+                        (
+                            f"juror {juror_index} verification {item}: "
+                            + "x" * 280
+                        )[:280]
+                        for item in range(4)
+                    ],
+                }
+            )
+        aggregate = aggregate_juries(judgments, labels)
+        self.assertTrue(aggregate["tie"])
+        self.assertEqual(set(aggregate["tied_candidates"]), set(labels))
+        actual_synthesis_chars = combined_prompt_chars(
+            synthesis_prompts(
+                question,
+                artifacts,
+                aggregate,
+                judgments,
+            )
+        )
+        plan = estimate_workload(
+            question,
+            providers,
+            RunPolicy(),
+        )
+
+        self.assertGreaterEqual(
+            plan["stage_prompt_chars"]["synthesis"],
+            actual_synthesis_chars,
+        )
+        boundary_plan = estimate_workload(
+            question,
+            providers,
+            RunPolicy(
+                max_stage_prompt_chars=actual_synthesis_chars - 1
+            ),
+        )
+        self.assertIn(
+            "synthesis",
+            boundary_plan["prompt_limit_exceeded_stages"],
+        )
 
     def test_question_limit_is_reported_separately(self) -> None:
         plan = estimate_workload(

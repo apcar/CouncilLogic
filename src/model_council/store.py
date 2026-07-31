@@ -691,6 +691,47 @@ class CouncilStore:
                 invocation_id = str(existing["id"])
                 if existing["status"] in {"running", "succeeded"}:
                     return invocation_id
+                prior_failure = _decode_json(
+                    existing["error_json"],
+                    {
+                        "message": existing["error_message"],
+                        "category": existing["error_category"],
+                        "retryable": bool(existing["error_retryable"]),
+                        "status_code": existing["error_status_code"],
+                        "request_id": existing["request_id"],
+                        "attempts": existing["attempts"],
+                        "ambiguous": bool(existing["error_ambiguous"]),
+                    },
+                )
+                retry_kind = (
+                    "truncation"
+                    if str(prior_failure.get("message") or "").endswith(
+                        "(finish_reason=length)"
+                    )
+                    else "application"
+                )
+                retry_event = {
+                    "stage": stage,
+                    "provider": provider,
+                    "retry_call_count": int(existing["call_count"]) + 1,
+                    "retry_kind": retry_kind,
+                    "prior_failure": prior_failure,
+                }
+                retry_event_json = _canonical_json(retry_event)
+                connection.execute(
+                    """
+                    INSERT INTO events (
+                        run_id, event_type, payload_json, payload_sha256,
+                        created_at
+                    ) VALUES (?, 'provider_retry_started', ?, ?, ?)
+                    """,
+                    (
+                        run_id,
+                        retry_event_json,
+                        _sha256_text(retry_event_json),
+                        now,
+                    ),
+                )
                 connection.execute(
                     """
                     UPDATE invocations
