@@ -19,5 +19,7 @@ class Provider(ABC):
         system_prompt: str,
         user_prompt: str,
         stage: str,
+        max_output_tokens: int | None = None,
+        timeout_seconds: float | None = None,
     ) -> ProviderResponse:
         """Generate one response without logging or persisting the credential."""

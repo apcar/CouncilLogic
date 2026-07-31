@@ -5,6 +5,9 @@ from enum import StrEnum
 from typing import Any
 
 
+COUNCIL_STAGES = frozenset({"proposal", "jury", "synthesis"})
+
+
 class ErrorCategory(StrEnum):
     AUTHENTICATION = "authentication"
     PERMISSION = "permission"
@@ -54,10 +57,22 @@ class ProviderConfig:
     timeout_seconds: float = 90.0
     max_attempts: int = 3
     enabled: bool = True
+    stage_max_output_tokens: dict[str, int] = field(default_factory=dict)
+    stage_timeout_seconds: dict[str, float] = field(default_factory=dict)
     extra: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
+
+    def output_tokens_for(self, stage: str) -> int:
+        return int(
+            self.stage_max_output_tokens.get(stage, self.max_output_tokens)
+        )
+
+    def timeout_for(self, stage: str) -> float:
+        return float(
+            self.stage_timeout_seconds.get(stage, self.timeout_seconds)
+        )
 
     @classmethod
     def from_dict(cls, value: dict[str, Any]) -> ProviderConfig:
@@ -71,6 +86,18 @@ class ProviderConfig:
             timeout_seconds=float(value.get("timeout_seconds", 90.0)),
             max_attempts=int(value.get("max_attempts", 3)),
             enabled=bool(value.get("enabled", True)),
+            stage_max_output_tokens={
+                str(stage): int(limit)
+                for stage, limit in dict(
+                    value.get("stage_max_output_tokens") or {}
+                ).items()
+            },
+            stage_timeout_seconds={
+                str(stage): float(limit)
+                for stage, limit in dict(
+                    value.get("stage_timeout_seconds") or {}
+                ).items()
+            },
             extra=dict(value.get("extra") or {}),
         )
 
@@ -110,9 +137,13 @@ class RunPolicy:
     proposal_quorum: int = 3
     jury_quorum: int = 3
     min_lineages: int = 3
-    max_calls: int = 12
-    deadline_seconds: float = 420.0
+    max_calls: int = 16
+    deadline_seconds: float = 480.0
     allow_partial: bool = True
+    max_question_chars: int = 30_000
+    max_stage_prompt_chars: int = 60_000
+    truncation_retries: int = 1
+    max_recovery_output_tokens: int = 8_192
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -124,9 +155,17 @@ class RunPolicy:
             proposal_quorum=int(value.get("proposal_quorum", 3)),
             jury_quorum=int(value.get("jury_quorum", 3)),
             min_lineages=int(value.get("min_lineages", 3)),
-            max_calls=int(value.get("max_calls", 12)),
-            deadline_seconds=float(value.get("deadline_seconds", 420.0)),
+            max_calls=int(value.get("max_calls", 16)),
+            deadline_seconds=float(value.get("deadline_seconds", 480.0)),
             allow_partial=bool(value.get("allow_partial", True)),
+            max_question_chars=int(value.get("max_question_chars", 30_000)),
+            max_stage_prompt_chars=int(
+                value.get("max_stage_prompt_chars", 60_000)
+            ),
+            truncation_retries=int(value.get("truncation_retries", 1)),
+            max_recovery_output_tokens=int(
+                value.get("max_recovery_output_tokens", 8_192)
+            ),
         )
 
 

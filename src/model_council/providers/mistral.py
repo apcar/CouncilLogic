@@ -10,7 +10,7 @@ from model_council.models import (
     ProviderResponse,
     Usage,
 )
-from model_council.protocol import jury_json_schema
+from model_council.protocol import structured_output_schema
 
 from .base import Provider
 from .http import JsonHttpClient, JsonResponse
@@ -49,26 +49,33 @@ class MistralProvider(Provider):
         system_prompt: str,
         user_prompt: str,
         stage: str,
+        max_output_tokens: int | None = None,
+        timeout_seconds: float | None = None,
     ) -> ProviderResponse:
+        output_schema = structured_output_schema(stage)
         payload: dict[str, Any] = {
             "model": self.config.model,
             "messages": [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
             ],
-            "max_tokens": self.config.max_output_tokens,
+            "max_tokens": (
+                max_output_tokens
+                if max_output_tokens is not None
+                else self.config.output_tokens_for(stage)
+            ),
             "stream": False,
             "reasoning_effort": str(
                 self.config.extra.get("reasoning_effort", "none")
             ),
         }
-        if stage == "jury":
+        if output_schema is not None:
             payload["response_format"] = {
                 "type": "json_schema",
                 "json_schema": {
-                    "name": "model_council_jury",
+                    "name": f"model_council_{stage}",
                     "strict": True,
-                    "schema": jury_json_schema(),
+                    "schema": output_schema,
                 },
             }
         for option in ("temperature", "random_seed"):
@@ -80,7 +87,11 @@ class MistralProvider(Provider):
             url=self.config.endpoint,
             headers={"Authorization": f"Bearer {self._api_key}"},
             payload=payload,
-            timeout_seconds=self.config.timeout_seconds,
+            timeout_seconds=(
+                timeout_seconds
+                if timeout_seconds is not None
+                else self.config.timeout_for(stage)
+            ),
             max_attempts=self.config.max_attempts,
         )
         return self._parse(
@@ -123,7 +134,7 @@ class MistralProvider(Provider):
         if not isinstance(raw_finish_reason, str):
             raw_finish_reason = None
         normalized_finish_reason = _finish_reason(raw_finish_reason)
-        if normalized_finish_reason != "stop":
+        if normalized_finish_reason not in {"stop", "length"}:
             raise ProviderError(
                 "Mistral response did not complete normally"
                 f" (finish_reason={raw_finish_reason or 'missing'})",
@@ -138,7 +149,7 @@ class MistralProvider(Provider):
                 attempts=result.attempts,
                 ambiguous=False,
             )
-        if not content:
+        if not content and normalized_finish_reason != "length":
             raise ProviderError(
                 "Mistral response did not contain generated text",
                 category=(

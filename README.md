@@ -56,18 +56,40 @@ See [Research](docs/RESEARCH.md).
 
 ## How CouncilLogic works
 
-1. **Propose:** every configured lineage answers independently.
+1. **Propose:** every configured lineage emits an independently reasoned,
+   size-bounded JSON artifact.
 2. **Judge:** each participating lineage ranks relabeled candidates without
    provider attribution; structured responses are validated locally.
 3. **Aggregate:** deterministic Borda scoring combines valid juries.
-4. **Synthesize:** the selected lineage receives the candidates, aggregate,
-   and jury records and writes the final answer.
+4. **Synthesize:** the selected lineage receives bounded candidates, the
+   aggregate, and compact vote records and writes the final answer.
 
 A default live run uses eleven application-level calls: five proposals, five
 juries, and one synthesis. Mock mode and the frozen `0.2.0a1` service reference
 topology remain four-lineage, nine-call fixtures. Successful work is persisted
 and reused on resume. The application does not give models tools, web access,
 code execution, or model-initiated actions.
+
+## Workload reliability
+
+Before the first provider call, CouncilLogic deterministically projects the
+largest prompt each stage can produce from the configured participant count
+and protocol bounds. It rejects a question when either the input itself or the
+projected downstream prompt graph exceeds policy, so an oversized run fails
+before incurring provider cost.
+
+Providers have separate proposal, jury, and synthesis output-token and request
+timeout budgets. Known `finish_reason=length` completions may receive one
+larger-output retry when the run still has call, deadline, and recovery budget.
+The truncated response is first preserved as an audit event. Ambiguous
+timeouts, connection losses, and interrupted running calls are never retried
+automatically.
+
+Every terminal result reports `completion_quality` as `clean` or `degraded`,
+membership counts, recovery records, projected and actual prompt sizes, and
+application-level call count. A completed synthesis can therefore be
+distinguished from a clean council run; partial and failed runs are always
+degraded.
 
 ## Five-minute credential-free quickstart
 

@@ -38,6 +38,7 @@ class FakeProvider(Provider):
         *,
         fail_stages: set[str] | None = None,
         finish_reasons: dict[str, str | None] | None = None,
+        truncate_once_stages: set[str] | None = None,
     ) -> None:
         super().__init__(
             ProviderConfig(
@@ -52,7 +53,9 @@ class FakeProvider(Provider):
         )
         self.fail_stages = fail_stages or set()
         self.finish_reasons = finish_reasons or {}
+        self.truncate_once_stages = truncate_once_stages or set()
         self.calls: list[str] = []
+        self.call_limits: list[dict[str, object]] = []
 
     def generate(
         self,
@@ -60,8 +63,17 @@ class FakeProvider(Provider):
         system_prompt: str,
         user_prompt: str,
         stage: str,
+        max_output_tokens: int | None = None,
+        timeout_seconds: float | None = None,
     ) -> ProviderResponse:
         self.calls.append(stage)
+        self.call_limits.append(
+            {
+                "stage": stage,
+                "max_output_tokens": max_output_tokens,
+                "timeout_seconds": timeout_seconds,
+            }
+        )
         if stage in self.fail_stages:
             raise ProviderError(
                 "synthetic outage",
@@ -70,12 +82,15 @@ class FakeProvider(Provider):
                 status_code=503,
             )
         if stage == "proposal":
-            content = (
-                "## Outcome\n"
-                f"{self.config.name} proposes the tested answer.\n"
-                "## Evidence and reasoning\nSynthetic fixture.\n"
-                "## Uncertainty\nLow.\n"
-                "## Verification needed\nRun the test."
+            content = json.dumps(
+                {
+                    "outcome": (
+                        f"{self.config.name} proposes the tested answer."
+                    ),
+                    "evidence_and_reasoning": ["Synthetic fixture."],
+                    "uncertainty": ["Low."],
+                    "verification_needed": ["Run the test."],
+                }
             )
         elif stage == "jury":
             match = re.search(
@@ -90,8 +105,9 @@ class FakeProvider(Provider):
             labels = sorted(
                 candidates,
                 key=lambda label: (
-                    "alpha proposes" not in candidates[label],
-                    candidates[label],
+                    "alpha proposes"
+                    not in candidates[label].get("outcome", ""),
+                    candidates[label].get("outcome", ""),
                 ),
             )
             content = json.dumps(
@@ -116,6 +132,12 @@ class FakeProvider(Provider):
             )
         else:
             raise AssertionError(stage)
+        finish_reason = self.finish_reasons.get(stage, "stop")
+        if (
+            stage in self.truncate_once_stages
+            and self.calls.count(stage) == 1
+        ):
+            finish_reason = "length"
         return ProviderResponse(
             content=content,
             resolved_model=self.config.model,
@@ -123,7 +145,7 @@ class FakeProvider(Provider):
             usage=Usage(input_tokens=10, output_tokens=20, total_tokens=30),
             latency_ms=5,
             attempts=1,
-            finish_reason=self.finish_reasons.get(stage, "stop"),
+            finish_reason=finish_reason,
         )
 
 
@@ -168,10 +190,16 @@ class CouncilEngineTests(unittest.TestCase):
             )
 
             self.assertEqual(result["status"], "completed")
+            self.assertEqual(result["completion_quality"], "clean")
             self.assertIn("deterministic council completed", result["answer"])
             self.assertEqual(len(result["proposals"]), 3)
+            self.assertTrue(
+                all(proposal["artifact"] for proposal in result["proposals"])
+            )
             self.assertEqual(len(result["juries"]), 3)
             self.assertIsNotNone(result["aggregate"]["winner"])
+            self.assertTrue(result["workload"]["preflight"]["within_limits"])
+            self.assertEqual(result["membership"]["successful_proposals"], 3)
             self.assertEqual(store.get_run(result["run_id"])["status"], "completed")
             calls_before = {
                 name: list(provider.calls) for name, provider in providers.items()
@@ -194,6 +222,7 @@ class CouncilEngineTests(unittest.TestCase):
             result = engine.run("Can two healthy lineages form quorum?")
 
             self.assertEqual(result["status"], "completed")
+            self.assertEqual(result["completion_quality"], "degraded")
             self.assertEqual(len(result["proposals"]), 2)
             self.assertGreaterEqual(len(result["failures"]), 2)
             self.assertTrue(
@@ -231,6 +260,7 @@ class CouncilEngineTests(unittest.TestCase):
                 3,
             )
             self.assertEqual(store.count_calls(result["run_id"]), 9)
+            self.assertEqual(result["completion_quality"], "degraded")
             self.assertEqual(len(result["failures"]), 2)
             self.assertTrue(
                 all(
@@ -264,6 +294,108 @@ class CouncilEngineTests(unittest.TestCase):
                 if record["stage"] == "synthesis"
             )
             self.assertEqual(invocation["status"], "failed")
+            self.assertEqual(invocation["call_count"], 2)
+            preserved = [
+                event
+                for event in store.list_events(result["run_id"])
+                if event["event_type"] == "truncated_response_preserved"
+            ]
+            self.assertEqual(len(preserved), 1)
+            self.assertEqual(
+                preserved[0]["payload"]["response"]["finish_reason"],
+                "length",
+            )
+            calls_before_resume = providers["alpha"].calls.count("synthesis")
+
+            resumed = engine.resume(result["run_id"])
+
+            self.assertEqual(resumed["status"], "partial")
+            self.assertEqual(
+                [
+                    recovery["status"]
+                    for recovery in resumed["recoveries"]
+                    if recovery["stage"] == "synthesis"
+                ],
+                ["failed"],
+            )
+            self.assertEqual(
+                providers["alpha"].calls.count("synthesis"),
+                calls_before_resume,
+            )
+            invocation = next(
+                record
+                for record in store.list_invocations(result["run_id"])
+                if record["stage"] == "synthesis"
+            )
+            self.assertEqual(invocation["call_count"], 2)
+
+    def test_length_completion_recovers_once_with_larger_output_budget(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            engine, providers, store = self._engine(Path(temporary))
+            providers["alpha"].truncate_once_stages.add("synthesis")
+
+            result = engine.run("Recover a safely truncated final synthesis")
+
+            self.assertEqual(result["status"], "completed")
+            self.assertEqual(result["completion_quality"], "degraded")
+            self.assertEqual(
+                [
+                    recovery["status"]
+                    for recovery in result["recoveries"]
+                    if recovery["stage"] == "synthesis"
+                ],
+                ["recovered"],
+            )
+            synthesis_limits = [
+                int(call["max_output_tokens"])
+                for call in providers["alpha"].call_limits
+                if call["stage"] == "synthesis"
+            ]
+            self.assertEqual(synthesis_limits, [1800, 3600])
+            invocation = next(
+                record
+                for record in store.list_invocations(result["run_id"])
+                if record["stage"] == "synthesis"
+            )
+            self.assertEqual(invocation["status"], "succeeded")
+            self.assertEqual(invocation["call_count"], 2)
+            self.assertEqual(store.count_calls(result["run_id"]), 8)
+            self.assertEqual(
+                len(
+                    [
+                        event
+                        for event in store.list_events(result["run_id"])
+                        if event["event_type"] == "truncation_recovery"
+                    ]
+                ),
+                1,
+            )
+
+    def test_preflight_rejects_oversized_question_before_creating_run(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            engine, providers, store = self._engine(Path(temporary))
+            bounded = CouncilEngine(
+                store=store,
+                providers=providers,
+                policy=RunPolicy(
+                    proposal_quorum=2,
+                    jury_quorum=2,
+                    min_lineages=2,
+                    max_calls=10,
+                    deadline_seconds=30,
+                    max_question_chars=10,
+                ),
+                synthesis_provider="alpha",
+            )
+
+            with self.assertRaisesRegex(ValueError, "Question is too large"):
+                bounded.run("This question is longer than ten characters.")
+
+            self.assertEqual(store.list_runs(), [])
 
     def test_idempotency_key_returns_the_same_run(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -442,7 +574,7 @@ class CouncilEngineTests(unittest.TestCase):
                 ProviderError("ambiguous gamma jury", ambiguous=True),
             )
 
-            successes, failures = engine._run_parallel_stage(
+            successes, failures, recoveries = engine._run_parallel_stage(
                 run_id=run_id,
                 stage="proposal",
                 prompts={
@@ -453,6 +585,7 @@ class CouncilEngineTests(unittest.TestCase):
             )
 
             self.assertEqual(set(successes), {"alpha"})
+            self.assertEqual(recoveries, [])
             self.assertEqual(providers["alpha"].calls, [])
             self.assertEqual(providers["beta"].calls, [])
             self.assertEqual(providers["gamma"].calls, [])

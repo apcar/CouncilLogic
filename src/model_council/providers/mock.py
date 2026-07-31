@@ -33,6 +33,8 @@ class MockProvider(Provider):
         system_prompt: str,
         user_prompt: str,
         stage: str,
+        max_output_tokens: int | None = None,
+        timeout_seconds: float | None = None,
     ) -> ProviderResponse:
         digest = hashlib.sha256(
             (
@@ -54,15 +56,22 @@ class MockProvider(Provider):
                 "Replace mock providers with configured external providers."
             )
         else:
-            content = (
-                "## Outcome\n"
-                f"Deterministic mock proposal {digest[:12]}.\n\n"
-                "## Evidence and reasoning\n"
-                "This response verifies the offline council execution path.\n\n"
-                "## Uncertainty\n"
-                "It contains no external factual verification.\n\n"
-                "## Verification needed\n"
-                "Run the same question with configured external providers."
+            content = json.dumps(
+                {
+                    "outcome": (
+                        f"Deterministic mock proposal {digest[:12]}."
+                    ),
+                    "evidence_and_reasoning": [
+                        "This response verifies the offline execution path."
+                    ],
+                    "uncertainty": [
+                        "It contains no external factual verification."
+                    ],
+                    "verification_needed": [
+                        "Run the same question with configured providers."
+                    ],
+                },
+                separators=(",", ":"),
             )
 
         input_tokens = len((system_prompt + " " + user_prompt).split())

@@ -9,9 +9,22 @@ All notable public changes to CouncilLogic are recorded here.
 - xAI's Grok 4.5 as a fifth live CLI provider, using the Responses API,
   structured jury output, official-host restriction, external-only
   `XAI_API_KEY` resolution, and provider-reported cost metadata.
+- A deterministic workload preflight that bounds question size and projected
+  proposal, jury, and synthesis prompt growth before any provider call.
+- Stage-specific provider output-token and request-timeout budgets, one
+  auditable larger-output recovery for known length truncations, explicit
+  clean/degraded completion quality, and workload/membership telemetry.
 
 ### Changed
 
+- Proposal responses are locally validated, size-bounded JSON artifacts.
+  Juries consume those artifacts, and synthesis consumes bounded candidates
+  plus compact vote records instead of every jury rationale.
+- The default call budget is 16, leaving room for the normal eleven-call live
+  topology plus at most one truncation recovery per participant slot; the
+  default cooperative deadline is 480 seconds.
+- Gemini uses low thinking by default and a 4,096-token stage budget so hidden
+  thinking is less likely to consume the visible artifact budget.
 - Replaced the fixed-member square logo with a provider-count-neutral
   CouncilLogic mark and PageParcel-sized README header, and made the public
   product framing independent of the current provider roster.

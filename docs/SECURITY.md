@@ -185,14 +185,16 @@ The application itself writes the audit database and explicit exports. An
 external secret resolver can have its own effects and must be reviewed
 separately.
 
-### Constrained jury output
+### Constrained proposal and jury output
 
-Jury calls include a fixed, non-sensitive JSON Schema so providers can
-constrain the output before it reaches the local parser. No question, candidate
-text, personal data, or secret is placed in the schema itself. The application
-still validates the returned object and its candidate labels locally.
+Proposal and jury calls include fixed, non-sensitive JSON Schemas so providers
+can constrain output before it reaches the local parser. Proposal field sizes
+and list counts are bounded; synthesis receives those bounded artifacts and
+compact vote records rather than full jury prose. No question, candidate text,
+personal data, or secret is placed in a schema itself. The application still
+validates every returned object and jury candidate label locally.
 Provider refusals and output-limit truncation can bypass schema guarantees and
-are treated as invalid judgments rather than trusted records.
+are treated as invalid artifacts rather than trusted records.
 
 ### Diversity and blinded evaluation
 
@@ -268,6 +270,14 @@ timeouts, quorum rules, an application-level call budget, process locks, and
 resumable successful stages. Ambiguous transport outcomes are not
 automatically retried. These controls improve recovery and reduce duplicate
 billable calls but do not guarantee availability.
+
+Before provider work begins, deterministic character-count preflight rejects
+questions or projected downstream prompts beyond configured limits. A known,
+non-ambiguous output-length completion may be retried once with a larger
+bounded output allowance; its initial raw response is preserved first.
+Ambiguous timeouts, connection failures, and crash-left-running calls remain
+non-retryable. Completed runs with any provider failure or recovery are marked
+`completion_quality=degraded`.
 
 CLI `max_calls` and service call units count application-level logical provider
 invocations, not HTTP attempts made inside provider retry loops.

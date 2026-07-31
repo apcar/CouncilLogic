@@ -43,6 +43,24 @@ class ConfigurationTests(unittest.TestCase):
                 DEFAULT_MODELS["xai"],
             ],
         )
+        self.assertEqual(config.policy.max_calls, 16)
+        self.assertEqual(config.policy.deadline_seconds, 480.0)
+        for provider in config.providers:
+            self.assertEqual(
+                set(provider.stage_max_output_tokens),
+                {"proposal", "jury", "synthesis"},
+            )
+            self.assertEqual(
+                set(provider.stage_timeout_seconds),
+                {"proposal", "jury", "synthesis"},
+            )
+        gemini = next(
+            provider
+            for provider in config.providers
+            if provider.name == "gemini"
+        )
+        self.assertEqual(gemini.extra["thinking_level"], "low")
+        self.assertEqual(gemini.output_tokens_for("proposal"), 4096)
 
     def test_legacy_file_config_does_not_silently_enable_xai(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -125,6 +143,20 @@ max_output_tokens = 0
             )
 
             with self.assertRaisesRegex(ValueError, "max_output_tokens"):
+                load_config(path)
+
+    def test_rejects_unknown_stage_limit(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "config.toml"
+            path.write_text(
+                """
+[providers.openai.stage_max_output_tokens]
+unknown = 100
+""",
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(ValueError, "unknown stages"):
                 load_config(path)
 
     def test_rejects_call_budget_below_complete_protocol(self) -> None:

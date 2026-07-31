@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
-from .models import ProviderConfig, RunPolicy
+from .models import COUNCIL_STAGES, ProviderConfig, RunPolicy
 
 
 DEFAULT_ENDPOINTS = {
@@ -46,6 +46,18 @@ DEFAULT_LINEAGES = {
     "xai": "xai-grok",
 }
 
+DEFAULT_STAGE_MAX_OUTPUT_TOKENS = {
+    "proposal": 3_200,
+    "jury": 2_200,
+    "synthesis": 3_200,
+}
+
+DEFAULT_STAGE_TIMEOUT_SECONDS = {
+    "proposal": 150.0,
+    "jury": 120.0,
+    "synthesis": 180.0,
+}
+
 ALLOWED_ENDPOINT_HOSTS = {
     "openai": {"api.openai.com"},
     "anthropic": {"api.anthropic.com"},
@@ -76,12 +88,25 @@ def default_data_dir() -> Path:
 
 def _default_provider(name: str) -> ProviderConfig:
     model_override = os.environ.get(f"MODEL_COUNCIL_{name.upper()}_MODEL")
+    stage_output_tokens = dict(DEFAULT_STAGE_MAX_OUTPUT_TOKENS)
+    extra: dict[str, Any] = {}
+    if name == "gemini":
+        # Gemini 3 Flash defaults to medium thinking. Thinking tokens count
+        # against the generation budget, which made bounded council artifacts
+        # truncate before visible output completed.
+        stage_output_tokens = {
+            stage: 4_096 for stage in COUNCIL_STAGES
+        }
+        extra["thinking_level"] = "low"
     return ProviderConfig(
         name=name,
         model=model_override or DEFAULT_MODELS[name],
         lineage=DEFAULT_LINEAGES[name],
         secret_name=DEFAULT_SECRETS[name],
         endpoint=DEFAULT_ENDPOINTS[name],
+        stage_max_output_tokens=stage_output_tokens,
+        stage_timeout_seconds=dict(DEFAULT_STAGE_TIMEOUT_SECONDS),
+        extra=extra,
     )
 
 
@@ -131,6 +156,21 @@ def validate_provider_config(config: ProviderConfig) -> None:
         raise ValueError(f"{config.name}: timeout_seconds must be positive")
     if not 1 <= config.max_attempts <= 10:
         raise ValueError(f"{config.name}: max_attempts must be between 1 and 10")
+    for field_name, values in (
+        ("stage_max_output_tokens", config.stage_max_output_tokens),
+        ("stage_timeout_seconds", config.stage_timeout_seconds),
+    ):
+        unknown = set(values) - COUNCIL_STAGES
+        if unknown:
+            raise ValueError(
+                f"{config.name}: {field_name} has unknown stages: "
+                f"{', '.join(sorted(unknown))}"
+            )
+        for stage, value in values.items():
+            if value <= 0:
+                raise ValueError(
+                    f"{config.name}: {field_name}.{stage} must be positive"
+                )
     _validate_endpoint(config)
 
 
@@ -145,6 +185,14 @@ def validate_run_policy(
             raise ValueError(f"{field_name} must be positive")
     if policy.deadline_seconds <= 0:
         raise ValueError("deadline_seconds must be positive")
+    if policy.max_question_chars < 1:
+        raise ValueError("max_question_chars must be positive")
+    if policy.max_stage_prompt_chars < 1:
+        raise ValueError("max_stage_prompt_chars must be positive")
+    if not 0 <= policy.truncation_retries <= 1:
+        raise ValueError("truncation_retries must be 0 or 1")
+    if policy.max_recovery_output_tokens < 1:
+        raise ValueError("max_recovery_output_tokens must be positive")
     if policy.proposal_quorum > len(providers):
         raise ValueError("Proposal quorum exceeds enabled provider count")
     if policy.jury_quorum > len(providers):
@@ -198,7 +246,30 @@ def load_config(path: str | Path | None = None) -> AppConfig:
             ),
             max_attempts=int(override.get("max_attempts", default.max_attempts)),
             enabled=bool(override.get("enabled", default.enabled)),
-            extra=dict(override.get("extra") or {}),
+            stage_max_output_tokens={
+                str(stage): int(limit)
+                for stage, limit in dict(
+                    override.get(
+                        "stage_max_output_tokens",
+                        default.stage_max_output_tokens,
+                    )
+                    or {}
+                ).items()
+            },
+            stage_timeout_seconds={
+                str(stage): float(limit)
+                for stage, limit in dict(
+                    override.get(
+                        "stage_timeout_seconds",
+                        default.stage_timeout_seconds,
+                    )
+                    or {}
+                ).items()
+            },
+            extra={
+                **default.extra,
+                **dict(override.get("extra") or {}),
+            },
         )
         if provider.enabled:
             validate_provider_config(provider)

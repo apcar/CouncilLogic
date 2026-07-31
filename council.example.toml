@@ -7,9 +7,13 @@ synthesis_provider = "openai"
 proposal_quorum = 3
 jury_quorum = 3
 min_lineages = 3
-max_calls = 12
-deadline_seconds = 420
+max_calls = 16
+deadline_seconds = 480
 allow_partial = true
+max_question_chars = 30000
+max_stage_prompt_chars = 60000
+truncation_retries = 1
+max_recovery_output_tokens = 8192
 
 [providers.openai]
 model = "gpt-5.6-sol"
@@ -17,12 +21,17 @@ secret_name = "OPENAI_API_KEY"
 max_output_tokens = 1800
 timeout_seconds = 90
 max_attempts = 3
+stage_max_output_tokens = { proposal = 3200, jury = 2200, synthesis = 3200 }
+stage_timeout_seconds = { proposal = 150, jury = 120, synthesis = 180 }
+
 [providers.anthropic]
 model = "claude-sonnet-4-6"
 secret_name = "ANTHROPIC_API_KEY"
 max_output_tokens = 1800
 timeout_seconds = 90
 max_attempts = 3
+stage_max_output_tokens = { proposal = 3200, jury = 2200, synthesis = 3200 }
+stage_timeout_seconds = { proposal = 150, jury = 120, synthesis = 180 }
 
 [providers.gemini]
 model = "gemini-3.6-flash"
@@ -30,6 +39,9 @@ secret_name = "GEMINI_API_KEY"
 max_output_tokens = 1800
 timeout_seconds = 90
 max_attempts = 3
+stage_max_output_tokens = { proposal = 4096, jury = 4096, synthesis = 4096 }
+stage_timeout_seconds = { proposal = 150, jury = 120, synthesis = 180 }
+extra = { thinking_level = "low" }
 
 [providers.mistral]
 model = "mistral-medium-3-5"
@@ -37,6 +49,8 @@ secret_name = "MISTRAL_API_KEY"
 max_output_tokens = 1800
 timeout_seconds = 90
 max_attempts = 3
+stage_max_output_tokens = { proposal = 3200, jury = 2200, synthesis = 3200 }
+stage_timeout_seconds = { proposal = 150, jury = 120, synthesis = 180 }
 
 [providers.xai]
 model = "grok-4.5"
@@ -44,3 +58,5 @@ secret_name = "XAI_API_KEY"
 max_output_tokens = 1800
 timeout_seconds = 90
 max_attempts = 3
+stage_max_output_tokens = { proposal = 3200, jury = 2200, synthesis = 3200 }
+stage_timeout_seconds = { proposal = 150, jury = 120, synthesis = 180 }

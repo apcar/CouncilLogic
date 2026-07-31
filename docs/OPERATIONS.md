@@ -215,8 +215,10 @@ data.
 
 The default five-provider live path has eleven application-level provider
 calls: five proposals, five juries, and one synthesis. Proposal and jury stages
-run in parallel. Successful stage/provider slots are reused on resume. The
-mock-only service remains a four-lineage, nine-call fixture.
+run in parallel. The default 16-call ceiling leaves five recovery slots, but a
+normal clean run still makes eleven calls. Successful stage/provider slots are
+reused on resume. The mock-only service remains a four-lineage, nine-call
+fixture.
 
 ## Policy controls
 
@@ -226,9 +228,13 @@ The defaults are:
 proposal_quorum = 3
 jury_quorum = 3
 min_lineages = 3
-max_calls = 12
-deadline_seconds = 420
+max_calls = 16
+deadline_seconds = 480
 allow_partial = true
+max_question_chars = 30000
+max_stage_prompt_chars = 60000
+truncation_retries = 1
+max_recovery_output_tokens = 8192
 ```
 
 Most fields can be overridden for one `run`:
@@ -239,7 +245,7 @@ council --config ./council.toml run \
   --proposal-quorum 4 \
   --jury-quorum 4 \
   --min-lineages 4 \
-  --max-calls 12 \
+  --max-calls 16 \
   --deadline-seconds 600
 ```
 
@@ -253,6 +259,28 @@ same logical stage/provider record. Each adapter may also make up to
 `max_attempts` lower-level HTTP attempts inside one application-level call.
 The setting is therefore neither an HTTP-request limit nor a monetary cost cap.
 Use provider-side budgets and alerts.
+
+`max_question_chars` bounds the submitted question. Before creating a run, the
+workload planner also constructs protocol-bound maximum proposal artifacts and
+projects the largest proposal, jury, and synthesis prompts for the selected
+participant count. If any projected stage exceeds `max_stage_prompt_chars`,
+the command fails before the run row or provider calls are created. The
+question limit can therefore pass while downstream-growth preflight still
+rejects the workload.
+
+`truncation_retries = 1` permits exactly one automatic retry only when a
+provider returned a completed, non-ambiguous response explicitly marked
+`finish_reason=length`. The first raw response is preserved in a
+`truncated_response_preserved` event, and the retry uses the smaller of a
+doubled output budget or `max_recovery_output_tokens`. It also consumes one
+`max_calls` unit. Set `truncation_retries = 0` to disable this behavior.
+Timeouts, connection loss, and crash-left-running invocations remain ambiguous
+and are never automatically retried.
+
+Provider TOML supports `stage_max_output_tokens` and
+`stage_timeout_seconds` maps for `proposal`, `jury`, and `synthesis`. Command
+line overrides are available for workload policy; use the TOML for
+provider/stage budgets.
 
 `deadline_seconds` is cooperative. It prevents later work from starting once
 the deadline is observed, but it is not a process watchdog. An in-flight call
@@ -278,7 +306,9 @@ CLI exit codes are:
 - `3`: `run` or `resume` returned `partial` or `failed`.
 
 Do not treat a printed answer alone as success. Check both the process exit
-code and the persisted run status.
+code and the persisted run status. Also inspect `completion_quality`: `clean`
+means the run completed with no provider failure or truncation recovery;
+`degraded` covers partial/failed runs and completed answers with such events.
 
 ## Inspect, list, and export
 
@@ -295,9 +325,10 @@ council --config ./council.toml export RUN_ID \
 ```
 
 JSON inspection and export include the question, stored run configuration,
-result, prompts, raw response text, provider metadata, and errors. Treat exports
-as sensitive. The application sets an export file to mode `0600` but does not
-encrypt it.
+result, prompts, raw response text, provider metadata, errors, workload
+preflight, and audit events. Markdown export also preserves truncated-response
+events. Treat exports as sensitive. The application sets an export file to
+mode `0600` but does not encrypt it.
 
 ## Resume and interrupted runs
 
@@ -369,12 +400,28 @@ Check provider request and billing logs before starting a replacement run.
 Distinguish an adapter request timeout from the cooperative run deadline.
 Increase timeouts or deadlines only after checking cost and operational impact.
 
-### Invalid jury output
+### Invalid proposal or jury output
 
-The raw response remains in the audit record, but a jury that fails structured
-validation is excluded from the aggregate. Resume does not replace a
-successfully transported but structurally invalid response in this beta.
-Export the record and start a new run if another jury attempt is required.
+The raw response remains in the audit record. A proposal that fails structured
+validation is excluded from proposal quorum; a jury that fails validation is
+excluded from the aggregate. Resume does not replace a successfully
+transported but structurally invalid response in this beta. Export the record
+and start a new run if another attempt is required.
+
+### Workload preflight rejected
+
+No provider was called. Inspect the reported question and stage character
+counts. Reduce the supplied context or participant count before increasing
+`max_stage_prompt_chars`; a higher limit permits larger payloads and does not
+guarantee that each provider supports them.
+
+### Output truncated
+
+Inspect `recoveries`, `failures`, `completion_quality`, and the preserved
+`truncated_response_preserved` and `truncation_recovery` events. A successful
+one-shot recovery produces a completed but degraded result. If recovery failed
+or was unavailable, keep the partial record and reduce task breadth before
+raising output budgets.
 
 ### Synthesis did not complete
 

@@ -72,6 +72,12 @@ class CliTests(unittest.TestCase):
             inspected = json.loads(output)
             self.assertEqual(inspected["run"]["id"], run_id)
             self.assertEqual(len(inspected["invocations"]), 9)
+            self.assertTrue(
+                any(
+                    event["event_type"] == "workload_preflight"
+                    for event in inspected["events"]
+                )
+            )
 
             export_path = Path(temporary) / "council-export.md"
             code, _output, error = self._call(
@@ -86,7 +92,9 @@ class CliTests(unittest.TestCase):
             self.assertEqual(code, 0, error)
             exported = export_path.read_text(encoding="utf-8")
             self.assertIn("# CouncilLogic Run", exported)
+            self.assertIn("- Completion quality: `clean`", exported)
             self.assertIn("## Council answer", exported)
+            self.assertIn("## Recovery audit events", exported)
             self.assertEqual(stat.S_IMODE(export_path.stat().st_mode), 0o600)
 
     def test_live_doctor_reports_missing_credentials_without_values(self) -> None:

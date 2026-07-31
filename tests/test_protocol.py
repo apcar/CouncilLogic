@@ -16,6 +16,8 @@ from model_council.protocol import (  # noqa: E402
     jury_json_schema,
     jury_prompts,
     parse_jury,
+    parse_proposal,
+    proposal_json_schema,
     proposal_prompts,
     protocol_hash,
     synthesis_prompts,
@@ -39,6 +41,35 @@ def judgment(
         "material_disagreements": disagreements or [],
         "verification_needed": verification or [],
     }
+
+
+def proposal() -> dict[str, object]:
+    return {
+        "outcome": "Use the bounded workload runner.",
+        "evidence_and_reasoning": ["It limits downstream prompt growth."],
+        "uncertainty": ["Live-provider variance remains."],
+        "verification_needed": ["Run a private soak test."],
+    }
+
+
+class ProposalParsingTests(unittest.TestCase):
+    def test_parses_valid_bounded_proposal(self) -> None:
+        value = proposal()
+
+        parsed = parse_proposal(json.dumps(value))
+
+        self.assertEqual(parsed, value)
+
+    def test_rejects_oversized_or_extra_proposal_fields(self) -> None:
+        oversized = proposal()
+        oversized["outcome"] = "x" * 601
+        extra = proposal()
+        extra["provider"] = "untrusted"
+
+        with self.assertRaisesRegex(ValueError, "at most 600"):
+            parse_proposal(json.dumps(oversized))
+        with self.assertRaisesRegex(ValueError, "unexpected keys"):
+            parse_proposal(json.dumps(extra))
 
 
 class JuryParsingTests(unittest.TestCase):
@@ -158,6 +189,24 @@ class AggregationTests(unittest.TestCase):
 
 
 class PromptAndIdentityTests(unittest.TestCase):
+    def test_proposal_schema_requires_every_protocol_field(self) -> None:
+        schema = proposal_json_schema()
+
+        self.assertEqual(
+            set(schema["required"]),
+            {
+                "outcome",
+                "evidence_and_reasoning",
+                "uncertainty",
+                "verification_needed",
+            },
+        )
+        self.assertEqual(
+            schema["properties"]["outcome"]["maxLength"],
+            600,
+        )
+        self.assertFalse(schema["additionalProperties"])
+
     def test_jury_schema_requires_every_protocol_field(self) -> None:
         schema = jury_json_schema()
 
@@ -184,7 +233,8 @@ class PromptAndIdentityTests(unittest.TestCase):
             [judgment("A", ["A", "B"])],
         )
 
-        self.assertIn("## Outcome", proposal_system)
+        self.assertIn('"evidence_and_reasoning"', proposal_system)
+        self.assertIn("valid finished object", proposal_system)
         self.assertIn("untrusted question data", proposal_user)
         self.assertIn("metadata-blind", jury_system)
         self.assertIn('"winner"', jury_system)
@@ -192,13 +242,15 @@ class PromptAndIdentityTests(unittest.TestCase):
         self.assertIn("not a new juror", synthesis_system)
         self.assertIn("## Dissent", synthesis_system)
         self.assertIn('"aggregate"', synthesis_user)
+        self.assertIn('"jury_votes"', synthesis_user)
+        self.assertNotIn('"rationale"', synthesis_user)
 
     def test_protocol_identity_and_stable_hash(self) -> None:
         self.assertEqual(PROTOCOL_ID, "independent-jury")
-        self.assertEqual(PROTOCOL_VERSION, "1.0.0-beta")
+        self.assertEqual(PROTOCOL_VERSION, "1.1.0-beta")
         self.assertEqual(
             protocol_hash(),
-            "9d7cf6ef8f444e849ca26c5bb1a84f3d5b6382883370297fb7318d07fc00176d",
+            "0dbb61f8966f45375bf4aa2553726df5720457e46791e3ce1896b3f141f107d7",
         )
 
 

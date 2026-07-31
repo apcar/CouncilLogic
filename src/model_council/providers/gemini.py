@@ -11,7 +11,7 @@ from model_council.models import (
     ProviderResponse,
     Usage,
 )
-from model_council.protocol import jury_json_schema
+from model_council.protocol import structured_output_schema
 
 from .base import Provider
 from .http import JsonHttpClient, JsonResponse
@@ -58,16 +58,28 @@ class GeminiProvider(Provider):
         system_prompt: str,
         user_prompt: str,
         stage: str,
+        max_output_tokens: int | None = None,
+        timeout_seconds: float | None = None,
     ) -> ProviderResponse:
+        output_schema = structured_output_schema(stage)
         generation_config: dict[str, Any] = {
-            "maxOutputTokens": self.config.max_output_tokens
+            "maxOutputTokens": (
+                max_output_tokens
+                if max_output_tokens is not None
+                else self.config.output_tokens_for(stage)
+            )
         }
-        if stage == "jury":
+        if output_schema is not None:
             generation_config["responseFormat"] = {
                 "text": {
                     "mimeType": "APPLICATION_JSON",
-                    "schema": jury_json_schema(),
+                    "schema": output_schema,
                 }
+            }
+        thinking_level = self.config.extra.get("thinking_level")
+        if isinstance(thinking_level, str) and thinking_level:
+            generation_config["thinkingConfig"] = {
+                "thinkingLevel": thinking_level,
             }
         if "temperature" in self.config.extra:
             generation_config["temperature"] = self.config.extra["temperature"]
@@ -90,7 +102,11 @@ class GeminiProvider(Provider):
             url=endpoint,
             headers={"x-goog-api-key": self._api_key},
             payload=payload,
-            timeout_seconds=self.config.timeout_seconds,
+            timeout_seconds=(
+                timeout_seconds
+                if timeout_seconds is not None
+                else self.config.timeout_for(stage)
+            ),
             max_attempts=self.config.max_attempts,
         )
         return self._parse(
@@ -127,7 +143,11 @@ class GeminiProvider(Provider):
                         ):
                             text_parts.append(part["text"])
         content = "".join(text_parts).strip()
-        if not content:
+        raw_finish_reason = candidate.get("finishReason") if candidate else None
+        if not isinstance(raw_finish_reason, str):
+            raw_finish_reason = None
+        finish_reason = _finish_reason(raw_finish_reason)
+        if not content and finish_reason != "length":
             feedback = data.get("promptFeedback")
             feedback = feedback if isinstance(feedback, dict) else {}
             blocked = bool(feedback.get("blockReason"))
@@ -168,11 +188,6 @@ class GeminiProvider(Provider):
         request_id = result.request_id
         if request_id is None and isinstance(data.get("responseId"), str):
             request_id = data["responseId"]
-        raw_finish_reason = candidate.get("finishReason") if candidate else None
-        if not isinstance(raw_finish_reason, str):
-            raw_finish_reason = None
-        finish_reason = _finish_reason(raw_finish_reason)
-
         return ProviderResponse(
             content=content,
             resolved_model=resolved_model,

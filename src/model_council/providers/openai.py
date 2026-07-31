@@ -10,7 +10,7 @@ from model_council.models import (
     ProviderResponse,
     Usage,
 )
-from model_council.protocol import jury_json_schema
+from model_council.protocol import structured_output_schema
 
 from .base import Provider
 from .http import JsonHttpClient, JsonResponse
@@ -51,12 +51,19 @@ class OpenAIProvider(Provider):
         system_prompt: str,
         user_prompt: str,
         stage: str,
+        max_output_tokens: int | None = None,
+        timeout_seconds: float | None = None,
     ) -> ProviderResponse:
+        output_schema = structured_output_schema(stage)
         payload: dict[str, Any] = {
             "model": self.config.model,
             "instructions": system_prompt,
             "input": user_prompt,
-            "max_output_tokens": self.config.max_output_tokens,
+            "max_output_tokens": (
+                max_output_tokens
+                if max_output_tokens is not None
+                else self.config.output_tokens_for(stage)
+            ),
             "store": False,
             "reasoning": {
                 "effort": str(
@@ -64,13 +71,13 @@ class OpenAIProvider(Provider):
                 )
             },
         }
-        if stage == "jury":
+        if output_schema is not None:
             payload["text"] = {
                 "format": {
                     "type": "json_schema",
-                    "name": "model_council_jury",
+                    "name": f"model_council_{stage}",
                     "strict": True,
-                    "schema": jury_json_schema(),
+                    "schema": output_schema,
                 }
             }
         if "temperature" in self.config.extra:
@@ -81,7 +88,11 @@ class OpenAIProvider(Provider):
             url=self.config.endpoint,
             headers={"Authorization": f"Bearer {self._api_key}"},
             payload=payload,
-            timeout_seconds=self.config.timeout_seconds,
+            timeout_seconds=(
+                timeout_seconds
+                if timeout_seconds is not None
+                else self.config.timeout_for(stage)
+            ),
             max_attempts=self.config.max_attempts,
         )
         return self._parse(
@@ -121,7 +132,14 @@ class OpenAIProvider(Provider):
         content = "".join(text_parts).strip()
         if not content and isinstance(data.get("output_text"), str):
             content = data["output_text"].strip()
-        if not content:
+        incomplete = data.get("incomplete_details")
+        incomplete = incomplete if isinstance(incomplete, dict) else {}
+        raw_finish_reason = incomplete.get("reason")
+        if not isinstance(raw_finish_reason, str):
+            status = data.get("status")
+            raw_finish_reason = status if isinstance(status, str) else None
+        finish_reason = _finish_reason(raw_finish_reason)
+        if not content and finish_reason != "length":
             category = (
                 ErrorCategory.CONTENT_FILTER
                 if refused
@@ -150,14 +168,6 @@ class OpenAIProvider(Provider):
             cached_input_tokens=_integer(input_details.get("cached_tokens")),
             reasoning_tokens=_integer(output_details.get("reasoning_tokens")),
         )
-
-        incomplete = data.get("incomplete_details")
-        incomplete = incomplete if isinstance(incomplete, dict) else {}
-        raw_finish_reason = incomplete.get("reason")
-        if not isinstance(raw_finish_reason, str):
-            status = data.get("status")
-            raw_finish_reason = status if isinstance(status, str) else None
-        finish_reason = _finish_reason(raw_finish_reason)
 
         resolved_model = data.get("model")
         if not isinstance(resolved_model, str) or not resolved_model:
