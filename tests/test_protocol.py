@@ -326,20 +326,22 @@ class PromptAndIdentityTests(unittest.TestCase):
         self.assertIn('"evidence_and_reasoning"', proposal_system)
         self.assertIn("valid finished object", proposal_system)
         self.assertIn(
-            "verification_needed\nmust contain at most four items each",
+            "Target at most three evidence_and_reasoning and\n"
+            "verification_needed items and at most two uncertainty items",
             proposal_system,
         )
-        self.assertIn(
-            "uncertainty must contain at most three",
-            proposal_system,
-        )
+        self.assertIn("rewrite it shorter before returning", proposal_system)
+        self.assertIn("hard limits still apply", proposal_system)
         self.assertIn("untrusted question data", proposal_user)
         self.assertIn("metadata-blind", jury_system)
         self.assertIn('"winner"', jury_system)
         self.assertIn(
-            "no more than 500 characters in rationale",
+            "no more than 400 characters in rationale",
             jury_system,
         )
+        self.assertIn("two items per array", jury_system)
+        self.assertIn("140 characters per array item", jury_system)
+        self.assertIn("rewrite it shorter before returning", jury_system)
         self.assertIn("Hard schema limits are at most 700", jury_system)
         self.assertIn('"B": "Second"', jury_user)
         self.assertIn("not a new juror", synthesis_system)
@@ -350,10 +352,10 @@ class PromptAndIdentityTests(unittest.TestCase):
 
     def test_protocol_identity_and_stable_hash(self) -> None:
         self.assertEqual(PROTOCOL_ID, "independent-jury")
-        self.assertEqual(PROTOCOL_VERSION, "1.1.2-beta")
+        self.assertEqual(PROTOCOL_VERSION, "1.1.3-beta")
         self.assertEqual(
             protocol_hash(),
-            "af3bb70e9e6a205438703001e31a7bdae1cf167980243b1f87752c8e8ad2ca32",
+            "7f34c0b0120a25ebe8a5476216fae4823dcc9dd202975cea38754570dcbbb7be",
         )
 
 

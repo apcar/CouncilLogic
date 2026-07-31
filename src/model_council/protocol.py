@@ -15,7 +15,7 @@ from typing import Any
 
 
 PROTOCOL_ID = "independent-jury"
-PROTOCOL_VERSION = "1.1.2-beta"
+PROTOCOL_VERSION = "1.1.3-beta"
 CANDIDATE_LABEL_PREFIX = "CANDIDATE_"
 
 PROPOSAL_OUTCOME_MAX_CHARS = 600
@@ -55,12 +55,13 @@ these keys:
 }
 
 Keep every field concise and complete. Prioritize a valid finished object over
-additional detail. Aim for no more than 400 characters in outcome, 220
-characters per evidence_and_reasoning item, and 160 characters per uncertainty
-or verification_needed item. evidence_and_reasoning and verification_needed
-must contain at most four items each; uncertainty must contain at most three.
-The schema permits modest headroom; never pad a field to its hard limit. Do not
-add keys. Do not force certainty."""
+additional detail. Target no more than 350 characters in outcome, 180
+characters per evidence_and_reasoning item, and 120 characters per uncertainty
+or verification_needed item. Target at most three evidence_and_reasoning and
+verification_needed items and at most two uncertainty items. If a draft exceeds
+one of those targets, rewrite it shorter before returning. The schema permits
+modest headroom beyond the targets, but its hard limits still apply: never pad a
+field to its limit. Do not add keys. Do not force certainty."""
 
 
 _PROPOSAL_USER_TEMPLATE = """\
@@ -109,10 +110,11 @@ Rules:
 - rationale must be a concise non-empty string.
 - In free-text fields, refer to a candidate only by its exact full allowed
   label. Never abbreviate, renumber, or reinterpret a candidate label.
-- Aim for no more than 500 characters in rationale, three items per array, and
-  180 characters per array item. Hard schema limits are at most 700 characters
-  in rationale, four items per array, and 280 characters per array item. Keep
-  headroom rather than filling a field to its hard limit.
+- Target no more than 400 characters in rationale, two items per array, and
+  140 characters per array item. If a draft exceeds one of those targets,
+  rewrite it shorter before returning. Hard schema limits are at most 700
+  characters in rationale, four items per array, and 280 characters per array
+  item. Keep headroom rather than filling a field to its hard limit.
 - Do not add keys."""
 
 

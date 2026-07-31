@@ -25,6 +25,9 @@ All notable public changes to CouncilLogic are recorded here.
   provider requests within each stage; the default is five.
 - Sanitized transport-failure telemetry with the generated client request ID,
   elapsed milliseconds, transport phase, and timeout subtype.
+- Wider target-to-hard-limit margins in proposal and jury prompts so providers
+  that cannot enforce every JSON Schema bound are less likely to lose an
+  otherwise useful artifact to a small local length or item-count overrun.
 
 ### Changed
 
