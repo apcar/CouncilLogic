@@ -13,6 +13,7 @@ deadline_seconds = 900
 allow_partial = true
 max_question_chars = 30000
 max_stage_prompt_chars = 60000
+jury_repair_attempts = 1
 truncation_retries = 1
 max_recovery_output_tokens = 8192
 

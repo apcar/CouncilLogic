@@ -14,6 +14,7 @@ from model_council.config import (  # noqa: E402
     default_config,
     load_config,
 )
+from model_council.models import RunPolicy  # noqa: E402
 from model_council.secrets import (  # noqa: E402
     ChainedSecretResolver,
     CommandSecretResolver,
@@ -22,6 +23,15 @@ from model_council.secrets import (  # noqa: E402
 
 
 class ConfigurationTests(unittest.TestCase):
+    def test_run_policy_preserves_legacy_positional_field_order(self) -> None:
+        policy = RunPolicy(
+            2, 2, 2, 9, 4, 60.0, False, 1_000, 2_000, 0, 4_096
+        )
+
+        self.assertEqual(policy.truncation_retries, 0)
+        self.assertEqual(policy.max_recovery_output_tokens, 4_096)
+        self.assertEqual(policy.jury_repair_attempts, 0)
+
     def test_defaults_pin_seven_current_lineages(self) -> None:
         config = default_config()
 
@@ -56,6 +66,7 @@ class ConfigurationTests(unittest.TestCase):
         self.assertEqual(config.policy.max_calls, 20)
         self.assertEqual(config.policy.max_parallel_calls, 5)
         self.assertEqual(config.policy.deadline_seconds, 900.0)
+        self.assertEqual(config.policy.jury_repair_attempts, 1)
         for provider in config.providers:
             self.assertEqual(
                 set(provider.stage_max_output_tokens),
@@ -132,6 +143,7 @@ class ConfigurationTests(unittest.TestCase):
             self.assertEqual(config.policy.max_calls, 16)
             self.assertEqual(config.policy.max_parallel_calls, 5)
             self.assertEqual(config.policy.deadline_seconds, 900.0)
+            self.assertEqual(config.policy.jury_repair_attempts, 0)
 
     def test_example_config_activates_seven_and_parks_upstage(self) -> None:
         config = load_config(PROJECT_ROOT / "council.example.toml")
@@ -151,6 +163,7 @@ class ConfigurationTests(unittest.TestCase):
         self.assertEqual(config.policy.max_calls, 20)
         self.assertEqual(config.policy.max_parallel_calls, 5)
         self.assertEqual(config.policy.deadline_seconds, 900.0)
+        self.assertEqual(config.policy.jury_repair_attempts, 1)
 
     def test_example_config_can_enable_full_eight_provider_bench(self) -> None:
         example = (PROJECT_ROOT / "council.example.toml").read_text(
@@ -393,6 +406,17 @@ max_parallel_calls = 0
             )
 
             with self.assertRaisesRegex(ValueError, "max_parallel_calls"):
+                load_config(path)
+
+    def test_rejects_more_than_one_jury_repair_attempt(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "config.toml"
+            path.write_text(
+                "[policy]\njury_repair_attempts = 2\n",
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(ValueError, "jury_repair_attempts"):
                 load_config(path)
 
 

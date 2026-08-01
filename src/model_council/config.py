@@ -178,7 +178,7 @@ def default_config() -> AppConfig:
         # Seven clean participants require 15 calls. Preserve the previous
         # five-call recovery margin rather than making the larger default
         # topology consume the entire application-level budget.
-        policy=RunPolicy(max_calls=20),
+        policy=RunPolicy(max_calls=20, jury_repair_attempts=1),
         synthesis_provider="openai",
         data_dir=default_data_dir(),
     )
@@ -253,6 +253,8 @@ def validate_run_policy(
         raise ValueError("max_question_chars must be positive")
     if policy.max_stage_prompt_chars < 1:
         raise ValueError("max_stage_prompt_chars must be positive")
+    if not 0 <= policy.jury_repair_attempts <= 1:
+        raise ValueError("jury_repair_attempts must be 0 or 1")
     if not 0 <= policy.truncation_retries <= 1:
         raise ValueError("truncation_retries must be 0 or 1")
     if policy.max_recovery_output_tokens < 1:

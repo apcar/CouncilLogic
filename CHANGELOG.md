@@ -28,6 +28,10 @@ All notable public changes to CouncilLogic are recorded here.
 - Wider target-to-hard-limit margins in proposal and jury prompts so providers
   that cannot enforce every JSON Schema bound are less likely to lose an
   otherwise useful artifact to a small local length or item-count overrun.
+- An optional one-attempt, same-provider jury-artifact repair for ballots whose
+  vote fields are valid but whose prose violates local bounds. The original
+  and repaired invocations are preserved separately, decision fields are
+  immutable, synthesis keeps a reserved call, and repaired runs are degraded.
 
 ### Changed
 
@@ -56,6 +60,14 @@ All notable public changes to CouncilLogic are recorded here.
   models do not pad, overfill, or corrupt artifacts at provider-relaxed schema
   limits. Local validation also bounds JSON-escaped string size and rejects
   unpaired surrogates before artifacts can exceed planned downstream prompts.
+- The jury rationale target remains 400 characters while its hard validation
+  limit increases from 700 to 1,000 characters. Protocol-enabled repair adds
+  `jury_repair` invocation and workload telemetry,
+  `jury_artifact_repair`/`incomplete_response_preserved` audit events, and the
+  `membership.recovered_jury_repairs` count.
+- The no-config live policy and example config enable one jury repair attempt.
+  Programmatic `RunPolicy()`, mock/service policy, and file-backed configs that
+  omit the new key retain zero attempts to avoid a silent billable-call change.
 - Proposal responses are locally validated, size-bounded JSON artifacts.
   Juries consume those artifacts, and synthesis consumes bounded candidates
   plus compact vote records instead of every jury rationale.

@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import json
 from typing import Any, Iterable
 
 from .models import RunPolicy
 from .protocol import (
     JURY_LIST_ITEM_MAX_CHARS,
     JURY_LIST_MAX_ITEMS,
+    JURY_REPAIR_ERROR_MAX_CHARS,
+    JURY_REPAIR_INPUT_MAX_CHARS,
     PROTOCOL_ID,
     PROTOCOL_VERSION,
     PROPOSAL_OUTCOME_MAX_CHARS,
@@ -19,6 +22,7 @@ from .protocol import (
     PROPOSAL_VERIFICATION_MAX_ITEMS,
     candidate_label,
     jury_prompts,
+    jury_repair_prompts,
     proposal_prompts,
     synthesis_prompts,
 )
@@ -140,6 +144,32 @@ def estimate_workload(
         "jury": jury_chars,
         "synthesis": synthesis_chars,
     }
+    if policy.jury_repair_attempts:
+        repair_value = {
+            "winner": labels[0],
+            "ranking": labels,
+            "confidence": "medium",
+            "abstain": False,
+            "rationale": "",
+            "material_disagreements": [],
+            "verification_needed": [],
+        }
+        repair_response = json.dumps(repair_value, ensure_ascii=False)
+        remaining = JURY_REPAIR_INPUT_MAX_CHARS - len(repair_response)
+        # Backslashes maximize the second JSON-serialization expansion when
+        # the raw response is embedded as untrusted repair data.
+        repair_value["rationale"] = (
+            "\\" * (remaining // 2) + "x" * (remaining % 2)
+        )
+        repair_response = json.dumps(repair_value, ensure_ascii=False)
+        repair_system, repair_user, _decision = jury_repair_prompts(
+            repair_response,
+            "x" * JURY_REPAIR_ERROR_MAX_CHARS,
+            labels,
+        )
+        stage_prompt_chars["jury_repair"] = combined_prompt_chars(
+            (repair_system, repair_user)
+        )
     exceeded_stages = sorted(
         stage
         for stage, chars in stage_prompt_chars.items()

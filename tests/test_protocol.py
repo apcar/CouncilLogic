@@ -15,6 +15,7 @@ from model_council.protocol import (  # noqa: E402
     aggregate_juries,
     jury_json_schema,
     jury_prompts,
+    jury_repair_prompts,
     parse_jury,
     parse_proposal,
     proposal_json_schema,
@@ -146,6 +147,52 @@ class JuryParsingTests(unittest.TestCase):
             ValueError, "serialized JSON characters"
         ):
             parse_jury(json.dumps(escaped), ["A", "B"])
+
+    def test_jury_rationale_accepts_1000_and_rejects_1001_characters(
+        self,
+    ) -> None:
+        boundary = judgment("A", ["A", "B"])
+        boundary["rationale"] = "x" * 1_000
+        oversized = dict(boundary)
+        oversized["rationale"] = "x" * 1_001
+
+        self.assertEqual(
+            len(parse_jury(json.dumps(boundary), ["A", "B"])["rationale"]),
+            1_000,
+        )
+        with self.assertRaisesRegex(ValueError, "at most 1000"):
+            parse_jury(json.dumps(oversized), ["A", "B"])
+
+    def test_jury_repair_prompt_locks_the_existing_decision(self) -> None:
+        oversized = judgment("B", ["B", "A"])
+        oversized["rationale"] = "x" * 1_001
+
+        system, user, decision = jury_repair_prompts(
+            json.dumps(oversized),
+            "rationale must be at most 1000 characters",
+            ["A", "B"],
+        )
+
+        self.assertEqual(
+            decision,
+            {
+                "winner": "B",
+                "ranking": ["B", "A"],
+                "confidence": "medium",
+                "abstain": False,
+            },
+        )
+        self.assertIn("not a new evaluation", system)
+        self.assertIn("must remain exactly as provided", system)
+        self.assertIn("Hard limits are 1000 characters", system)
+        self.assertIn("BEGIN_UNTRUSTED_JURY_REPAIR_JSON", user)
+        self.assertIn('"winner": "B"', user)
+        with self.assertRaisesRegex(ValueError, "at most 6000"):
+            jury_repair_prompts(
+                "x" * 6_001,
+                "validation error",
+                ["A", "B"],
+            )
 
 
 class AggregationTests(unittest.TestCase):
@@ -282,8 +329,12 @@ class PromptAndIdentityTests(unittest.TestCase):
             "verification_needed",
         })
         self.assertIn(
-            "700 characters",
+            "1000 characters",
             schema["properties"]["rationale"]["description"],
+        )
+        self.assertEqual(
+            schema["properties"]["rationale"]["maxLength"],
+            1_000,
         )
         self.assertIn(
             "Must contain at most 4 items",
@@ -342,7 +393,7 @@ class PromptAndIdentityTests(unittest.TestCase):
         self.assertIn("two items per array", jury_system)
         self.assertIn("140 characters per array item", jury_system)
         self.assertIn("rewrite it shorter before returning", jury_system)
-        self.assertIn("Hard schema limits are at most 700", jury_system)
+        self.assertIn("Hard schema limits are at most 1000", jury_system)
         self.assertIn('"B": "Second"', jury_user)
         self.assertIn("not a new juror", synthesis_system)
         self.assertIn("## Dissent", synthesis_system)
@@ -352,10 +403,10 @@ class PromptAndIdentityTests(unittest.TestCase):
 
     def test_protocol_identity_and_stable_hash(self) -> None:
         self.assertEqual(PROTOCOL_ID, "independent-jury")
-        self.assertEqual(PROTOCOL_VERSION, "1.1.3-beta")
+        self.assertEqual(PROTOCOL_VERSION, "1.2.0-beta")
         self.assertEqual(
             protocol_hash(),
-            "7f34c0b0120a25ebe8a5476216fae4823dcc9dd202975cea38754570dcbbb7be",
+            "75d54e3b70065da230715501b3bebb602e7cae7ab6c8185dd94bac15e1e6da4d",
         )
 
 

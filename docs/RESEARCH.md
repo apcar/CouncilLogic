@@ -64,6 +64,11 @@ Related protocol families remain useful comparison targets:
 7. Any future debate, critique-revision, confidence weighting, or
    mixture-of-agents protocol needs a distinct version and matched-cost
    evaluation before becoming a default.
+8. A prose-only jury repair is not a new evaluation, but accepting a repaired
+   ballot can change the aggregate relative to excluding it. Evaluations and
+   canaries should therefore report repair rate, added calls and cost, and any
+   outcome sensitivity rather than treating repair as invisible schema
+   hygiene.
 
 ## Interpreting additional lineages
 

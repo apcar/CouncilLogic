@@ -210,6 +210,19 @@ and still enforces the canonical bound after the response returns.
 Provider refusals and output-limit truncation can bypass schema guarantees and
 are treated as invalid artifacts rather than trusted records.
 
+Jury rationale instructions target 400 characters and local validation permits
+at most 1,000. When explicitly enabled by policy, one completed jury with a
+valid winner/ranking/confidence/abstention tuple may be sent back to the same
+provider for a decision-locked prose repair. The four decision fields must be
+exactly value-equal after local parsing; regenerated rationale,
+disagreement, and verification prose is not mechanically equivalent and
+requires audit. The original and repaired invocations are retained separately,
+and any repaired result is degraded. Missing or ambiguous decisions,
+multiple-object artifacts, and original responses above the bounded repair
+input size are not repairable. The same provider processes its
+original output a second time, so provider-side logging and retention apply to
+both requests.
+
 ### Diversity and blinded evaluation
 
 The default live configuration uses seven separately named lineages. Candidate
@@ -281,6 +294,13 @@ from quoted evidence, minimize supplied context, and verify important claims
 against primary sources outside the council. A confident consensus is not a
 security control.
 
+The jury-repair prompt treats the bounded original response and validation
+error as delimited untrusted data and repeats only a locally parsed immutable
+decision. This limits but does not eliminate prompt-injection risk: repaired
+free text may still be distorted, and the repair is visible to the same
+provider that produced the original artifact. Never place secrets in a jury
+response merely because a repair path is bounded.
+
 ## Availability and cost
 
 The application uses bounded retries for explicit retryable HTTP responses,
@@ -293,6 +313,12 @@ Before provider work begins, deterministic character-count preflight rejects
 questions or projected downstream prompts beyond configured limits. A known,
 non-ambiguous output-length completion may be retried once with a larger
 bounded output allowance; its initial raw response is preserved first.
+When enabled, each eligible invalid jury may consume one additional
+application-level same-provider repair call. Repairs share `max_calls`, are
+prioritized in provider-configuration order, inherit jury token/timeout and
+lower-level transport-retry settings, and cannot consume the synthesis-reserved
+call. A dispatched repair is never logically replayed, repaired again, or
+given output-length recovery; an ambiguous outcome stays excluded.
 Ambiguous timeouts, connection failures, and crash-left-running calls remain
 non-retryable. Completed runs with any provider failure or recovery are marked
 `completion_quality=degraded`.

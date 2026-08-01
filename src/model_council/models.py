@@ -145,6 +145,7 @@ class RunPolicy:
     max_stage_prompt_chars: int = 60_000
     truncation_retries: int = 1
     max_recovery_output_tokens: int = 8_192
+    jury_repair_attempts: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -164,6 +165,7 @@ class RunPolicy:
             max_stage_prompt_chars=int(
                 value.get("max_stage_prompt_chars", 60_000)
             ),
+            jury_repair_attempts=int(value.get("jury_repair_attempts", 0)),
             truncation_retries=int(value.get("truncation_retries", 1)),
             max_recovery_output_tokens=int(
                 value.get("max_recovery_output_tokens", 8_192)

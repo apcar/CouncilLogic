@@ -89,6 +89,16 @@ The truncated response is first preserved as an audit event. Ambiguous
 timeouts, connection losses, and interrupted running calls are never retried
 automatically.
 
+Jury rationales target 400 characters and have a 1,000-character hard limit.
+When enabled, a completed jury artifact with valid vote fields but invalid
+free-text fields may receive one same-provider, prose-only repair. The repair
+must preserve winner, ranking, confidence, and abstention exactly; the original
+and repaired responses remain separate audit records. It consumes one shared
+`max_calls` unit, never receives a repair-of-repair or output-length retry, and
+cannot consume the call reserved for synthesis. Because accepting a repaired
+ballot can change the aggregate relative to excluding it, any repaired run is
+reported as degraded.
+
 Every terminal result reports `completion_quality` as `clean` or `degraded`,
 membership counts, recovery records, projected and actual prompt sizes, and
 application-level call count. A completed synthesis can therefore be

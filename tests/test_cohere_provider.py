@@ -191,7 +191,7 @@ class CohereProviderTests(unittest.TestCase):
             winner["anyOf"], [{"type": "string"}, {"type": "null"}]
         )
         self.assertIn(
-            "700 characters",
+            "1000 characters",
             schema["properties"]["rationale"]["description"],
         )
         self.assertNotIn("cohere-secret", json.dumps(body))

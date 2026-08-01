@@ -472,7 +472,7 @@ class ParsingTests(unittest.TestCase):
             else:
                 properties = schema["properties"]
                 self.assertIn(
-                    "700 characters",
+                    "1000 characters",
                     properties["rationale"]["description"],
                 )
                 for field_name in (

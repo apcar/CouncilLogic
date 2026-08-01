@@ -20,6 +20,7 @@ from .protocol import (
     aggregate_juries,
     candidate_label,
     jury_prompts,
+    jury_repair_prompts,
     parse_jury,
     parse_proposal,
     proposal_prompts,
@@ -40,6 +41,7 @@ _CANDIDATE_NAMESPACE_EVENT = "candidate_namespace_locked"
 _CANDIDATE_NAMESPACE_VERSION = 1
 _ADJUDICATION_EVENT = "adjudication_locked"
 _ADJUDICATION_VERSION = 1
+_JURY_REPAIR_EVENT = "jury_artifact_repair"
 _PROVIDER_RETRY_EVENT = "provider_retry_started"
 
 
@@ -181,7 +183,8 @@ class CouncilEngine:
         recoveries: list[dict[str, Any]] = [
             dict(event["payload"])
             for event in existing_events
-            if event["event_type"] == "truncation_recovery"
+            if event["event_type"]
+            in {"truncation_recovery", _JURY_REPAIR_EVENT}
         ]
         if namespace_lock is None:
             candidate_mapping: dict[str, str] | None = None
@@ -321,49 +324,22 @@ class CouncilEngine:
             recoveries.extend(jury_recoveries)
             jury_stage_failures = list(jury_failures)
 
-            jury_records: list[dict[str, Any]] = []
-            for juror_name, response in jury_responses.items():
-                presentation_order = jury_presentation_orders[juror_name]
-                try:
-                    parsed = parse_jury(
-                        response.content, list(candidate_mapping)
-                    )
-                    canonical = self._canonicalize_jury(
-                        parsed, candidate_mapping
-                    )
-                    canonical.update(
-                        {
-                            "juror": juror_name,
-                            "juror_model": response.resolved_model,
-                            "mapping": candidate_mapping,
-                            "presentation_order": presentation_order,
-                            "valid": True,
-                        }
-                    )
-                except (TypeError, ValueError) as exc:
-                    canonical = {
-                        "juror": juror_name,
-                        "juror_model": response.resolved_model,
-                        "mapping": candidate_mapping,
-                        "presentation_order": presentation_order,
-                        "valid": False,
-                        "error": str(exc),
-                    }
-                    failure = self._failure_payload(
-                        "jury",
-                        juror_name,
-                        ProviderError(
-                            f"Jury artifact was invalid: {exc}",
-                            category=ErrorCategory.INVALID_RESPONSE,
-                            retryable=False,
-                            request_id=response.request_id,
-                            attempts=response.attempts,
-                            ambiguous=False,
-                        ),
-                    )
-                    failures.append(failure)
-                    jury_stage_failures.append(failure)
-                jury_records.append(canonical)
+            (
+                jury_records,
+                artifact_failures,
+                artifact_recoveries,
+            ) = self._parse_and_repair_juries(
+                run_id=run_id,
+                candidate_mapping=candidate_mapping,
+                presentation_orders=jury_presentation_orders,
+                jury_responses=jury_responses,
+                deadline=deadline,
+            )
+            failures.extend(artifact_failures)
+            jury_stage_failures.extend(artifact_failures)
+            for recovery in artifact_recoveries:
+                if recovery not in recoveries:
+                    recoveries.append(recovery)
 
             valid_juries = [
                 jury for jury in jury_records if jury.get("valid")
@@ -469,6 +445,395 @@ class CouncilEngine:
         )
         return self._finish(run_id, result)
 
+    def _parse_and_repair_juries(
+        self,
+        *,
+        run_id: str,
+        candidate_mapping: dict[str, str],
+        presentation_orders: dict[str, list[str]],
+        jury_responses: dict[str, ProviderResponse],
+        deadline: float,
+    ) -> tuple[
+        list[dict[str, Any]],
+        list[dict[str, Any]],
+        list[dict[str, Any]],
+    ]:
+        """Validate jury artifacts and make at most one prose-only repair.
+
+        The original response remains in the durable ``jury`` invocation. A
+        repair uses a separate ``jury_repair`` invocation and is accepted only
+        when winner, ranking, confidence, and abstention are unchanged.
+        """
+
+        records: dict[str, dict[str, Any]] = {}
+        failures: list[dict[str, Any]] = []
+        recoveries: list[dict[str, Any]] = []
+        invalid: dict[str, dict[str, Any]] = {}
+        labels = list(candidate_mapping)
+
+        # Provider configuration order is the deterministic repair priority;
+        # response insertion order depends on network completion timing.
+        for juror_name in self.providers:
+            response = jury_responses.get(juror_name)
+            if response is None:
+                continue
+            presentation_order = presentation_orders[juror_name]
+            try:
+                parsed = parse_jury(response.content, labels)
+            except (TypeError, ValueError) as exc:
+                error = str(exc)
+                records[juror_name] = self._invalid_jury_record(
+                    juror_name,
+                    response,
+                    candidate_mapping,
+                    presentation_order,
+                    error,
+                )
+                initial_failure = self._jury_artifact_failure(
+                    juror_name,
+                    response,
+                    error,
+                )
+                repair_prompt: tuple[str, str] | None = None
+                immutable_decision: dict[str, Any] | None = None
+                repair_prompt_error: str | None = None
+                if self.policy.jury_repair_attempts:
+                    try:
+                        (
+                            repair_system,
+                            repair_user,
+                            immutable_decision,
+                        ) = jury_repair_prompts(
+                            response.content,
+                            error,
+                            labels,
+                        )
+                        repair_prompt = (repair_system, repair_user)
+                    except (TypeError, ValueError) as repair_exc:
+                        repair_prompt_error = str(repair_exc)
+                invalid[juror_name] = {
+                    "response": response,
+                    "presentation_order": presentation_order,
+                    "initial_error": error,
+                    "initial_failure": initial_failure,
+                    "repair_prompt": repair_prompt,
+                    "repair_prompt_error": repair_prompt_error,
+                    "immutable_decision": immutable_decision,
+                }
+                continue
+
+            records[juror_name] = self._valid_jury_record(
+                juror_name,
+                response,
+                candidate_mapping,
+                presentation_order,
+                parsed,
+            )
+
+        eligible_names = [
+            name
+            for name in self.providers
+            if name in invalid
+            and invalid[name]["repair_prompt"] is not None
+        ]
+        existing_repair_providers = {
+            str(record["provider"])
+            for record in self.store.list_invocations(run_id)
+            if record["stage"] == "jury_repair"
+        }
+        # Keep one call available for synthesis. Repairs consume only currently
+        # unused call capacity. Persisted repair invocations do not need new
+        # capacity and must always be selected on resume so their outcome
+        # cannot disappear.
+        new_repair_capacity = max(
+            0,
+            self.policy.max_calls - self.store.count_calls(run_id) - 1,
+        )
+        new_repair_names = [
+            name
+            for name in eligible_names
+            if name not in existing_repair_providers
+        ][:new_repair_capacity]
+        selected_names = [
+            name
+            for name in eligible_names
+            if name in existing_repair_providers
+            or name in new_repair_names
+        ]
+        repair_prompts = {
+            name: invalid[name]["repair_prompt"]
+            for name in selected_names
+        }
+        repair_responses: dict[str, ProviderResponse] = {}
+        repair_call_failures: list[dict[str, Any]] = []
+        if repair_prompts:
+            (
+                repair_responses,
+                repair_call_failures,
+                _nested_recoveries,
+            ) = self._run_parallel_stage(
+                run_id=run_id,
+                stage="jury_repair",
+                provider_stage="jury",
+                prompts=repair_prompts,
+                deadline=deadline,
+                allow_truncation_recovery=False,
+                retry_failed_invocations=False,
+                preserve_incomplete_responses=True,
+            )
+        repair_failure_by_provider = {
+            str(failure["provider"]): failure
+            for failure in repair_call_failures
+        }
+        repair_invocation_providers = {
+            str(record["provider"])
+            for record in self.store.list_invocations(run_id)
+            if record["stage"] == "jury_repair"
+        }
+
+        for juror_name in self.providers:
+            details = invalid.get(juror_name)
+            if details is None:
+                continue
+            response = details["response"]
+            initial_error = str(details["initial_error"])
+            recovery: dict[str, Any] | None = None
+            persist_recovery = True
+
+            if not self.policy.jury_repair_attempts:
+                failures.append(dict(details["initial_failure"]))
+                continue
+            if details["repair_prompt"] is None:
+                failures.append(dict(details["initial_failure"]))
+                recovery = {
+                    "kind": "jury_artifact_repair",
+                    "stage": "jury",
+                    "repair_stage": "jury_repair",
+                    "provider": juror_name,
+                    "status": "not_attempted",
+                    "initial_error": initial_error,
+                    "reason": (
+                        "immutable jury decision could not be recovered: "
+                        f"{details['repair_prompt_error']}"
+                    ),
+                }
+            elif juror_name not in selected_names:
+                failures.append(dict(details["initial_failure"]))
+                recovery = {
+                    "kind": "jury_artifact_repair",
+                    "stage": "jury",
+                    "repair_stage": "jury_repair",
+                    "provider": juror_name,
+                    "status": "not_attempted",
+                    "initial_error": initial_error,
+                    "reason": "call budget reserved for synthesis",
+                }
+            elif juror_name in repair_responses:
+                repair_response = repair_responses[juror_name]
+                final_error: str | None = None
+                try:
+                    parsed = parse_jury(repair_response.content, labels)
+                    repaired_decision = {
+                        key: parsed[key]
+                        for key in (
+                            "winner",
+                            "ranking",
+                            "confidence",
+                            "abstain",
+                        )
+                    }
+                    if repaired_decision != details["immutable_decision"]:
+                        raise ValueError(
+                            "repair changed immutable jury decision fields"
+                        )
+                except (TypeError, ValueError) as exc:
+                    final_error = str(exc)
+
+                if final_error is None:
+                    records[juror_name] = self._valid_jury_record(
+                        juror_name,
+                        response,
+                        candidate_mapping,
+                        details["presentation_order"],
+                        parsed,
+                    )
+                    recovery = {
+                        "kind": "jury_artifact_repair",
+                        "stage": "jury",
+                        "repair_stage": "jury_repair",
+                        "provider": juror_name,
+                        "status": "recovered",
+                        "initial_error": initial_error,
+                        "decision_preserved": True,
+                        "repair_resolved_model": (
+                            repair_response.resolved_model
+                        ),
+                    }
+                else:
+                    records[juror_name] = self._invalid_jury_record(
+                        juror_name,
+                        repair_response,
+                        candidate_mapping,
+                        details["presentation_order"],
+                        final_error,
+                    )
+                    failure = self._jury_artifact_failure(
+                        juror_name,
+                        repair_response,
+                        "repair remained invalid: " + final_error,
+                    )
+                    failure["attempt_stage"] = "jury_repair"
+                    failures.append(failure)
+                    recovery = {
+                        "kind": "jury_artifact_repair",
+                        "stage": "jury",
+                        "repair_stage": "jury_repair",
+                        "provider": juror_name,
+                        "status": "failed",
+                        "initial_error": initial_error,
+                        "final_error": final_error,
+                        "decision_preserved": False,
+                    }
+            else:
+                repair_failure = repair_failure_by_provider.get(juror_name)
+                repair_was_dispatched = (
+                    juror_name in repair_invocation_providers
+                )
+                final_failure = dict(details["initial_failure"])
+                if repair_failure is not None:
+                    final_failure.update(
+                        {
+                            key: value
+                            for key, value in repair_failure.items()
+                            if key not in {"stage", "provider", "message"}
+                        }
+                    )
+                    final_failure["message"] = (
+                        "Jury artifact repair failed after an invalid "
+                        f"response: {repair_failure.get('message')}"
+                    )
+                    final_failure["retryable"] = False
+                    final_failure["attempt_stage"] = "jury_repair"
+                failures.append(final_failure)
+                recovery = {
+                    "kind": "jury_artifact_repair",
+                    "stage": "jury",
+                    "repair_stage": "jury_repair",
+                    "provider": juror_name,
+                    "status": (
+                        "failed"
+                        if repair_was_dispatched
+                        else "not_attempted"
+                    ),
+                    "initial_error": initial_error,
+                    "final_error": (
+                        None
+                        if repair_failure is None
+                        else repair_failure.get("message")
+                    ),
+                    "decision_preserved": False,
+                }
+                # A deadline or local budget check can fail before an
+                # invocation is created. Keep that fact in the terminal
+                # result, but do not freeze it as an event: an interrupted
+                # run receives a fresh bounded deadline on resume and may
+                # safely make its still-unused repair attempt.
+                persist_recovery = repair_was_dispatched
+
+            if recovery is not None:
+                if persist_recovery:
+                    recovery = self._persist_jury_repair_event(
+                        run_id, recovery
+                    )
+                if recovery not in recoveries:
+                    recoveries.append(recovery)
+
+        return (
+            [records[name] for name in self.providers if name in records],
+            failures,
+            recoveries,
+        )
+
+    @staticmethod
+    def _valid_jury_record(
+        juror_name: str,
+        response: ProviderResponse,
+        candidate_mapping: dict[str, str],
+        presentation_order: list[str],
+        parsed: dict[str, Any],
+    ) -> dict[str, Any]:
+        canonical = CouncilEngine._canonicalize_jury(
+            parsed, candidate_mapping
+        )
+        canonical.update(
+            {
+                "juror": juror_name,
+                "juror_model": response.resolved_model,
+                "mapping": candidate_mapping,
+                "presentation_order": presentation_order,
+                "valid": True,
+            }
+        )
+        return canonical
+
+    @staticmethod
+    def _invalid_jury_record(
+        juror_name: str,
+        response: ProviderResponse,
+        candidate_mapping: dict[str, str],
+        presentation_order: list[str],
+        error: str,
+    ) -> dict[str, Any]:
+        return {
+            "juror": juror_name,
+            "juror_model": response.resolved_model,
+            "mapping": candidate_mapping,
+            "presentation_order": presentation_order,
+            "valid": False,
+            "error": error,
+        }
+
+    @staticmethod
+    def _jury_artifact_failure(
+        juror_name: str,
+        response: ProviderResponse,
+        error: str,
+    ) -> dict[str, Any]:
+        return CouncilEngine._failure_payload(
+            "jury",
+            juror_name,
+            ProviderError(
+                f"Jury artifact was invalid: {error}",
+                category=ErrorCategory.INVALID_RESPONSE,
+                retryable=False,
+                request_id=response.request_id,
+                attempts=response.attempts,
+                ambiguous=False,
+            ),
+        )
+
+    def _persist_jury_repair_event(
+        self,
+        run_id: str,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        matching = [
+            event
+            for event in self.store.list_events(run_id)
+            if event["event_type"] == _JURY_REPAIR_EVENT
+            and event.get("payload", {}).get("provider")
+            == payload.get("provider")
+        ]
+        if len(matching) > 1:
+            raise ValueError("Run contains duplicate jury repair events")
+        if matching:
+            existing = dict(matching[0]["payload"])
+            if existing != payload:
+                raise ValueError("Jury repair audit event is inconsistent")
+            return existing
+        self.store.append_event(run_id, _JURY_REPAIR_EVENT, payload)
+        return dict(payload)
+
     def _run_parallel_stage(
         self,
         *,
@@ -478,6 +843,9 @@ class CouncilEngine:
         deadline: float,
         allow_truncation_recovery: bool = True,
         output_overrides: dict[str, int] | None = None,
+        provider_stage: str | None = None,
+        retry_failed_invocations: bool = True,
+        preserve_incomplete_responses: bool = False,
     ) -> tuple[
         dict[str, ProviderResponse],
         list[dict[str, Any]],
@@ -488,6 +856,7 @@ class CouncilEngine:
         recoveries: list[dict[str, Any]] = []
         work: dict[str, tuple[str, str]] = {}
         output_overrides = output_overrides or {}
+        provider_stage = provider_stage or stage
         existing_records = {
             (record["stage"], record["provider"]): record
             for record in self.store.list_invocations(run_id)
@@ -534,6 +903,25 @@ class CouncilEngine:
                     successes[provider_name] = response
                 continue
             record = existing_records.get((stage, provider_name))
+            if (
+                record
+                and record["status"] == "failed"
+                and record.get("error_ambiguous")
+                and not retry_failed_invocations
+            ):
+                stored_error = record.get("error")
+                if not isinstance(stored_error, dict):
+                    raise ValueError(
+                        "Ambiguous repair failure record is malformed"
+                    )
+                failures.append(
+                    {
+                        "stage": stage,
+                        "provider": provider_name,
+                        **dict(stored_error),
+                    }
+                )
+                continue
             if record and (
                 record["status"] == "running"
                 or (
@@ -556,6 +944,37 @@ class CouncilEngine:
                 failures.append(
                     self._failure_payload(stage, provider_name, ambiguous)
                 )
+                continue
+            if (
+                record
+                and record["status"] == "failed"
+                and not retry_failed_invocations
+            ):
+                stored_error = record.get("error")
+                if isinstance(stored_error, dict):
+                    failures.append(
+                        {
+                            "stage": stage,
+                            "provider": provider_name,
+                            **dict(stored_error),
+                        }
+                    )
+                else:
+                    failures.append(
+                        self._failure_payload(
+                            stage,
+                            provider_name,
+                            ProviderError(
+                                "Prior repair invocation failed; automatic "
+                                "retry refused",
+                                category=ErrorCategory.INVALID_RESPONSE,
+                                retryable=False,
+                                request_id=record.get("request_id"),
+                                attempts=int(record.get("attempts") or 1),
+                                ambiguous=False,
+                            ),
+                        )
+                    )
                 continue
             if (
                 record
@@ -688,7 +1107,7 @@ class CouncilEngine:
                 )
                 output_limit = output_overrides.get(
                     provider_name,
-                    provider.config.output_tokens_for(stage),
+                    provider.config.output_tokens_for(provider_stage),
                 )
                 if (
                     provider_name in prior_truncations
@@ -699,7 +1118,7 @@ class CouncilEngine:
                         self.policy.max_recovery_output_tokens,
                     )
                 timeout_limit = min(
-                    provider.config.timeout_for(stage),
+                    provider.config.timeout_for(provider_stage),
                     max(0.001, deadline - time.monotonic()),
                 )
                 lease: CallLease | None = None
@@ -715,7 +1134,7 @@ class CouncilEngine:
                         provider.generate,
                         system_prompt=system_prompt,
                         user_prompt=user_prompt,
-                        stage=stage,
+                        stage=provider_stage,
                         max_output_tokens=output_limit,
                         timeout_seconds=timeout_limit,
                     )
@@ -840,6 +1259,16 @@ class CouncilEngine:
                             output_limit,
                         )
                         continue
+                    if response is not None and preserve_incomplete_responses:
+                        self.store.append_event(
+                            run_id,
+                            "incomplete_response_preserved",
+                            {
+                                "stage": stage,
+                                "provider": provider_name,
+                                "response": response.to_dict(),
+                            },
+                        )
                     self.store.finish_invocation_failure(
                         invocation_id, completion_error
                     )
@@ -906,6 +1335,11 @@ class CouncilEngine:
                     deadline=deadline,
                     allow_truncation_recovery=False,
                     output_overrides=recovery_limits,
+                    provider_stage=provider_stage,
+                    retry_failed_invocations=retry_failed_invocations,
+                    preserve_incomplete_responses=(
+                        preserve_incomplete_responses
+                    ),
                 )
                 successes.update(recovered_successes)
                 failures.extend(recovery_failures)
@@ -980,17 +1414,18 @@ class CouncilEngine:
         )
 
     def _validate_provider_lock(self, locked: list[dict[str, Any]]) -> None:
-        current = {
-            name: provider.config.to_dict()
-            for name, provider in self.providers.items()
-        }
-        expected = {
-            str(item["name"]): ProviderConfig.from_dict(item).to_dict()
+        current = [
+            provider.config.to_dict()
+            for provider in self.providers.values()
+        ]
+        expected = [
+            ProviderConfig.from_dict(item).to_dict()
             for item in locked
-        }
+        ]
         if current != expected:
             raise ValueError(
-                "Current provider configuration differs from the run lock"
+                "Current provider configuration or order differs from the "
+                "run lock"
             )
 
     def _validate_policy_lock(self, locked: dict[str, Any]) -> None:
@@ -1609,7 +2044,16 @@ class CouncilEngine:
                     if (
                         recovery.get("status") == "recovered"
                         and recovery.get("kind")
-                        != "application_retry"
+                        in {None, "truncation_recovery", "truncation_retry"}
+                    )
+                ),
+                "recovered_jury_repairs": sum(
+                    1
+                    for recovery in result_recoveries
+                    if (
+                        recovery.get("status") == "recovered"
+                        and recovery.get("kind")
+                        == "jury_artifact_repair"
                     )
                 ),
             },

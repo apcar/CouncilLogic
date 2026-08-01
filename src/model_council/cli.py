@@ -70,6 +70,7 @@ def _parser() -> argparse.ArgumentParser:
     run.add_argument("--deadline-seconds", type=float)
     run.add_argument("--max-question-chars", type=int)
     run.add_argument("--max-stage-prompt-chars", type=int)
+    run.add_argument("--jury-repair-attempts", type=int)
     run.add_argument("--truncation-retries", type=int)
     run.add_argument("--max-recovery-output-tokens", type=int)
     run.add_argument("--idempotency-key")
@@ -133,6 +134,7 @@ def _select_run_config(
         "deadline_seconds",
         "max_question_chars",
         "max_stage_prompt_chars",
+        "jury_repair_attempts",
         "truncation_retries",
         "max_recovery_output_tokens",
     ):
@@ -318,6 +320,13 @@ def _print_result(result: dict[str, Any], *, as_json: bool) -> None:
         print("\nWarnings:")
         for warning in result["warnings"]:
             print(f"- {warning}")
+    if result.get("recoveries"):
+        print("\nRecoveries:")
+        for recovery in result["recoveries"]:
+            kind = recovery.get("kind") or recovery.get("stage", "unknown")
+            provider = recovery.get("provider", "unknown")
+            status = recovery.get("status", "unknown")
+            print(f"- {kind} / {provider}: {status}")
     if result.get("failures"):
         print("\nProvider failures:")
         for failure in result["failures"]:
@@ -410,7 +419,12 @@ def _markdown_export(
         event
         for event in events
         if event["event_type"]
-        in {"truncated_response_preserved", "truncation_recovery"}
+        in {
+            "truncated_response_preserved",
+            "truncation_recovery",
+            "jury_artifact_repair",
+            "incomplete_response_preserved",
+        }
     ]
     lines.extend(["## Recovery audit events", ""])
     if recovery_events:

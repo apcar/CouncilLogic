@@ -23,6 +23,39 @@ from model_council.workload import (  # noqa: E402
 
 
 class WorkloadPlanningTests(unittest.TestCase):
+    def test_jury_repair_prompt_is_projected_only_when_enabled(self) -> None:
+        providers = ("alpha", "beta", "gamma")
+
+        disabled = estimate_workload(
+            "Bound an optional repair.",
+            providers,
+            RunPolicy(jury_repair_attempts=0),
+        )
+        enabled = estimate_workload(
+            "Bound an optional repair.",
+            providers,
+            RunPolicy(jury_repair_attempts=1),
+        )
+        self.assertNotIn("jury_repair", disabled["stage_prompt_chars"])
+        self.assertIn("jury_repair", enabled["stage_prompt_chars"])
+        self.assertLessEqual(
+            enabled["stage_prompt_chars"]["jury_repair"],
+            enabled["max_stage_prompt_chars"],
+        )
+        boundary = estimate_workload(
+            "Bound an optional repair.",
+            providers,
+            RunPolicy(
+                jury_repair_attempts=1,
+                max_stage_prompt_chars=(
+                    enabled["stage_prompt_chars"]["jury_repair"] - 1
+                ),
+            ),
+        )
+        self.assertIn(
+            "jury_repair", boundary["prompt_limit_exceeded_stages"]
+        )
+
     def test_seven_provider_upper_bound_fits_default_prompt_budget(self) -> None:
         plan = estimate_workload(
             "Choose the safer implementation.",

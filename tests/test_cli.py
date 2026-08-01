@@ -13,7 +13,7 @@ import unittest
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
-from model_council.cli import _markdown_export, main  # noqa: E402
+from model_council.cli import _markdown_export, _print_result, main  # noqa: E402
 from model_council.store import CouncilStore  # noqa: E402
 
 
@@ -24,6 +24,33 @@ class CliTests(unittest.TestCase):
         with redirect_stdout(stdout), redirect_stderr(stderr):
             code = main(arguments)
         return code, stdout.getvalue(), stderr.getvalue()
+
+    def test_human_result_surfaces_recovery(self) -> None:
+        stdout = StringIO()
+        with redirect_stdout(stdout):
+            _print_result(
+                {
+                    "run_id": "repair-run",
+                    "status": "completed",
+                    "completion_quality": "degraded",
+                    "answer": "Repaired answer.",
+                    "recoveries": [
+                        {
+                            "kind": "jury_artifact_repair",
+                            "provider": "alpha",
+                            "status": "recovered",
+                        }
+                    ],
+                    "warnings": [],
+                    "failures": [],
+                },
+                as_json=False,
+            )
+
+        self.assertIn("Recoveries:", stdout.getvalue())
+        self.assertIn(
+            "jury_artifact_repair / alpha: recovered", stdout.getvalue()
+        )
 
     def test_mock_doctor_run_inspect_and_export(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -52,6 +79,8 @@ class CliTests(unittest.TestCase):
                     "9",
                     "--max-parallel-calls",
                     "2",
+                    "--jury-repair-attempts",
+                    "1",
                     "--json",
                 ]
             )
@@ -84,6 +113,10 @@ class CliTests(unittest.TestCase):
             self.assertEqual(
                 inspected["run"]["policy"]["max_parallel_calls"],
                 2,
+            )
+            self.assertEqual(
+                inspected["run"]["policy"]["jury_repair_attempts"],
+                1,
             )
             self.assertEqual(len(inspected["invocations"]), 9)
             self.assertTrue(
@@ -201,7 +234,16 @@ class CliTests(unittest.TestCase):
                 },
             },
             [],
-            [],
+            [
+                {
+                    "event_type": "jury_artifact_repair",
+                    "payload": {
+                        "kind": "jury_artifact_repair",
+                        "provider": "alpha",
+                        "status": "recovered",
+                    },
+                }
+            ],
         )
 
         self.assertIn("## Candidate namespace", rendered)
@@ -210,6 +252,8 @@ class CliTests(unittest.TestCase):
         self.assertIn("## Recoveries", rendered)
         self.assertIn('"kind": "application_retry"', rendered)
         self.assertIn('"status": "recovered"', rendered)
+        self.assertIn("## Recovery audit events", rendered)
+        self.assertIn('"event_type": "jury_artifact_repair"', rendered)
 
 
 if __name__ == "__main__":

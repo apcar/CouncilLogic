@@ -234,12 +234,17 @@ deadline_seconds = 900
 allow_partial = true
 max_question_chars = 30000
 max_stage_prompt_chars = 60000
+jury_repair_attempts = 1
 truncation_retries = 1
 max_recovery_output_tokens = 8192
 ```
 
-The no-config live CLI and `council.example.toml` use the 20-call ceiling.
-Existing file-backed configurations retain the pre-expansion 16-call default
+The no-config live CLI and `council.example.toml` use the 20-call ceiling and
+enable one decision-locked jury repair per eligible invalid ballot. A bare
+`RunPolicy()`, mock/service configuration, and any file-backed configuration
+that omits `jury_repair_attempts` use `0`; this preserves the behavior and cost
+of existing configuration files. Such files must opt in explicitly. Existing
+file-backed configurations also retain the pre-expansion 16-call default
 unless they set `max_calls`, so adding providers never silently raises their
 billable recovery ceiling.
 
@@ -253,6 +258,7 @@ council --config ./council.toml run \
   --min-lineages 4 \
   --max-calls 20 \
   --max-parallel-calls 5 \
+  --jury-repair-attempts 1 \
   --deadline-seconds 900
 ```
 
@@ -276,10 +282,13 @@ less simultaneous network and provider pressure.
 `max_question_chars` bounds the submitted question. Before creating a run, the
 workload planner also constructs protocol-bound maximum proposal artifacts and
 projects the largest proposal, jury, and synthesis prompts for the selected
-participant count. If any projected stage exceeds `max_stage_prompt_chars`,
-the command fails before the run row or provider calls are created. The
-question limit can therefore pass while downstream-growth preflight still
-rejects the workload.
+participant count. When jury repair is enabled, it also projects the largest
+possible repair prompt even if the eventual call graph may leave no repair
+capacity. This conservative potential-stage bound keeps every reachable repair
+within policy. If any projected stage exceeds `max_stage_prompt_chars`, the
+command fails before the run row or provider calls are created. The question
+limit can therefore pass while downstream-growth preflight still rejects the
+workload.
 
 `truncation_retries = 1` permits exactly one automatic retry only when a
 provider returned a completed, non-ambiguous response explicitly marked
@@ -290,10 +299,34 @@ doubled output budget or `max_recovery_output_tokens`. It also consumes one
 Timeouts, connection loss, and crash-left-running invocations remain ambiguous
 and are never automatically retried.
 
+`jury_repair_attempts = 1` permits at most one application-level repair for
+each completed jury artifact whose winner, ranking, confidence, and abstention
+already form a valid decision but whose free-text fields fail validation. The
+same provider receives the bounded original artifact, its validation error,
+and the immutable decision. The repaired ballot is accepted only if all four
+decision fields remain exactly unchanged. The rationale,
+`material_disagreements`, and `verification_needed` are regenerated and must be
+audited when their fidelity matters; a successful repair is therefore always
+degraded execution and can affect aggregation relative to excluding the
+invalid ballot.
+
+The original `jury` response and separate `jury_repair` invocation are both
+preserved. Repair priority follows configured provider order. Each repair uses
+one shared `max_calls` unit and inherits the provider's jury schema, output
+budget, timeout, and bounded lower-level HTTP retry policy. CouncilLogic always
+reserves one application call for synthesis. It does not perform a second
+logical repair, an output-length recovery of a repair, or an automatic replay
+after a dispatched repair fails or has an ambiguous outcome. A locally blocked
+repair that was never dispatched may still use its one attempt after an
+interrupted run resumes with a fresh deadline. Set `jury_repair_attempts = 0`
+to disable all jury repairs.
+
 Provider TOML supports `stage_max_output_tokens` and
 `stage_timeout_seconds` maps for `proposal`, `jury`, and `synthesis`. Command
 line overrides are available for workload policy; use the TOML for
-provider/stage budgets. Qwen's default stage timeouts are 300 seconds for
+provider/stage budgets. `jury_repair` is a distinct audit/application stage but
+uses the provider adapter's `jury` settings; it cannot be configured as a
+fourth provider stage. Qwen's default stage timeouts are 300 seconds for
 proposal and jury and 360 seconds for synthesis; the other default providers
 retain the generic 150/120/180-second stage limits.
 
@@ -323,7 +356,10 @@ CLI exit codes are:
 Do not treat a printed answer alone as success. Check both the process exit
 code and the persisted run status. Also inspect `completion_quality`: `clean`
 means the run completed with no provider failure or recovery; `degraded`
-covers partial/failed runs and completed answers with such events.
+covers partial/failed runs and completed answers with such events. Inspect the
+`recoveries` array and `membership.recovered_jury_repairs`; a successfully
+repaired ballot can produce a completed run with no top-level provider failure
+and still requires review.
 
 ## Inspect, list, and export
 
@@ -342,8 +378,10 @@ council --config ./council.toml export RUN_ID \
 JSON inspection and export include the question, stored run configuration,
 result, prompts, raw response text, provider metadata, errors, workload
 preflight, and audit events. Markdown export also preserves truncated-response
-events. Treat exports as sensitive. The application sets an export file to
-mode `0600` but does not encrypt it.
+events, incomplete repair responses, and jury-repair outcome events. Potential
+and actual prompt telemetry may include a `jury_repair` stage. Treat exports as
+sensitive. The application sets an export file to mode `0600` but does not
+encrypt it.
 
 ## Resume and interrupted runs
 
@@ -369,6 +407,12 @@ record is durably locked before synthesis dispatch. Resume reuses those locks
 instead of admitting newly recovered proposal or jury members into an
 already-persisted downstream prompt, and rejects missing, duplicate, or
 inconsistent lock records.
+
+A dispatched jury repair has its own durable `jury_repair` invocation and is
+never issued again on resume. Successful, failed, and ambiguous outcomes are
+reused exactly; an ambiguous repair remains excluded. If local deadline or
+budget policy stopped the repair before any invocation was created, an
+interrupted nonterminal run may use the still-unused attempt on resume.
 
 Before a non-ambiguous failed logical slot is restarted, its prior failure is
 atomically preserved in the audit log. The final result and Markdown export
@@ -441,10 +485,15 @@ Increase timeouts or deadlines only after checking cost and operational impact.
 ### Invalid proposal or jury output
 
 The raw response remains in the audit record. A proposal that fails structured
-validation is excluded from proposal quorum; a jury that fails validation is
-excluded from the aggregate. Resume does not replace a successfully
-transported but structurally invalid response in this beta. Export the record
-and start a new run if another attempt is required.
+validation is excluded from proposal quorum. A jury that fails validation is
+normally excluded from the aggregate. With `jury_repair_attempts = 1`, a jury
+is eligible for one same-provider decision-locked prose repair only when the
+original contains exactly one complete jury object, all required keys, and a
+locally valid winner/ranking/confidence/abstention tuple within the bounded
+repair-input size. Missing or ambiguous decisions, multiple objects, oversized
+inputs, failed repairs, and repairs that change any decision field remain
+invalid and excluded. Inspect both invocation records and the
+`jury_artifact_repair` event; prose meaning is not mechanically provable.
 
 ### Workload preflight rejected
 
@@ -569,6 +618,12 @@ Model changes create a new provider lock. Before changing a pinned model:
 
 Protocol code changes alter the immutable protocol hash and intentionally block
 old-run resume. Treat them as release changes, not live edits.
+
+The 1.2.0-beta protocol's 1,000-character rationale bound and optional jury repair
+apply only to newly created runs. They do not revalidate, repair, or recompute
+1.1.x records; preserve the older installation for any unfinished old run,
+export important completed records before rollout, and use a fresh idempotency
+key for a new 1.2.0-beta run.
 
 ## Retention and deletion
 

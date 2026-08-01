@@ -94,39 +94,63 @@ class FakeProvider(Provider):
                 }
             )
         elif stage == "jury":
-            match = re.search(
-                r"BEGIN_UNTRUSTED_EVALUATION_JSON\n(.*?)\n"
-                r"END_UNTRUSTED_EVALUATION_JSON",
+            repair_match = re.search(
+                r"BEGIN_UNTRUSTED_JURY_REPAIR_JSON\n(.*?)\n"
+                r"END_UNTRUSTED_JURY_REPAIR_JSON",
                 user_prompt,
                 re.DOTALL,
             )
-            if not match:
-                raise AssertionError("jury evaluation payload was not present")
-            candidates = json.loads(match.group(1))["candidates"]
-            labels = sorted(
-                candidates,
-                key=lambda label: (
-                    "alpha proposes"
-                    not in candidates[label].get("outcome", ""),
-                    candidates[label].get("outcome", ""),
-                ),
-            )
-            content = json.dumps(
-                {
-                    "winner": labels[0],
-                    "ranking": labels,
-                    "confidence": "medium",
-                    "abstain": False,
-                    "rationale": "The first candidate is best supported.",
-                    "material_disagreements": [
-                        (
-                            f"{labels[0]} uses different wording from "
-                            f"{labels[-1]}."
-                        )
-                    ],
-                    "verification_needed": ["Run the deterministic fixture."],
-                }
-            )
+            if repair_match:
+                repair_payload = json.loads(repair_match.group(1))
+                decision = repair_payload["immutable_decision"]
+                content = json.dumps(
+                    {
+                        **decision,
+                        "rationale": "The original judgment was preserved.",
+                        "material_disagreements": [],
+                        "verification_needed": [
+                            "Run the deterministic fixture."
+                        ],
+                    }
+                )
+            else:
+                match = re.search(
+                    r"BEGIN_UNTRUSTED_EVALUATION_JSON\n(.*?)\n"
+                    r"END_UNTRUSTED_EVALUATION_JSON",
+                    user_prompt,
+                    re.DOTALL,
+                )
+                if not match:
+                    raise AssertionError(
+                        "jury evaluation payload was not present"
+                    )
+                candidates = json.loads(match.group(1))["candidates"]
+                labels = sorted(
+                    candidates,
+                    key=lambda label: (
+                        "alpha proposes"
+                        not in candidates[label].get("outcome", ""),
+                        candidates[label].get("outcome", ""),
+                    ),
+                )
+                content = json.dumps(
+                    {
+                        "winner": labels[0],
+                        "ranking": labels,
+                        "confidence": "medium",
+                        "abstain": False,
+                        "rationale": "The first candidate is best supported.",
+                        "material_disagreements": [
+                            (
+                                f"{labels[0]} uses different wording from "
+                                f"{labels[-1]}."
+                            )
+                        ],
+                        "verification_needed": [
+                            "Run the deterministic fixture."
+                        ],
+                    }
+                )
         elif stage == "synthesis":
             content = (
                 "## Outcome\nThe deterministic council completed.\n"
@@ -150,6 +174,84 @@ class FakeProvider(Provider):
             latency_ms=5,
             attempts=1,
             finish_reason=finish_reason,
+        )
+
+
+class OversizedJuryProvider(FakeProvider):
+    def __init__(
+        self,
+        name: str,
+        *,
+        change_repair_decision: bool = False,
+        fail_repair: bool = False,
+        ambiguous_repair: bool = False,
+        repair_resolved_model: str | None = None,
+    ) -> None:
+        super().__init__(name)
+        self.change_repair_decision = change_repair_decision
+        self.fail_repair = fail_repair
+        self.ambiguous_repair = ambiguous_repair
+        self.repair_resolved_model = repair_resolved_model
+
+    def generate(
+        self,
+        *,
+        system_prompt: str,
+        user_prompt: str,
+        stage: str,
+        max_output_tokens: int | None = None,
+        timeout_seconds: float | None = None,
+    ) -> ProviderResponse:
+        is_repair = "BEGIN_UNTRUSTED_JURY_REPAIR_JSON" in user_prompt
+        if is_repair and (self.fail_repair or self.ambiguous_repair):
+            self.calls.append(stage)
+            self.call_limits.append(
+                {
+                    "stage": stage,
+                    "max_output_tokens": max_output_tokens,
+                    "timeout_seconds": timeout_seconds,
+                }
+            )
+            raise ProviderError(
+                (
+                    "synthetic ambiguous repair outcome"
+                    if self.ambiguous_repair
+                    else "synthetic repair outage"
+                ),
+                category=ErrorCategory.PROVIDER_SERVER,
+                retryable=True,
+                status_code=503,
+                ambiguous=self.ambiguous_repair,
+            )
+        response = super().generate(
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            stage=stage,
+            max_output_tokens=max_output_tokens,
+            timeout_seconds=timeout_seconds,
+        )
+        if stage != "jury":
+            return response
+        value = json.loads(response.content)
+        if is_repair:
+            if self.change_repair_decision:
+                value["ranking"] = list(reversed(value["ranking"]))
+                value["winner"] = value["ranking"][0]
+        else:
+            value["rationale"] = "x" * 1_001
+        return ProviderResponse(
+            content=json.dumps(value),
+            resolved_model=(
+                self.repair_resolved_model
+                if is_repair and self.repair_resolved_model is not None
+                else response.resolved_model
+            ),
+            request_id=response.request_id,
+            usage=response.usage,
+            latency_ms=response.latency_ms,
+            attempts=response.attempts,
+            finish_reason=response.finish_reason,
+            metadata=response.metadata,
         )
 
 
@@ -294,6 +396,432 @@ class CouncilEngineTests(unittest.TestCase):
             self.assertEqual(
                 calls_before,
                 {name: provider.calls for name, provider in providers.items()},
+            )
+
+    def test_invalid_jury_prose_is_repaired_once_without_changing_vote(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            providers: dict[str, FakeProvider] = {
+                "alpha": OversizedJuryProvider(
+                    "alpha", repair_resolved_model="repair-fallback-model"
+                ),
+                "beta": FakeProvider("beta"),
+                "gamma": FakeProvider("gamma"),
+            }
+            store = CouncilStore(Path(temporary))
+            engine = CouncilEngine(
+                store=store,
+                providers=providers,
+                policy=RunPolicy(
+                    proposal_quorum=2,
+                    jury_quorum=2,
+                    min_lineages=2,
+                    max_calls=10,
+                    deadline_seconds=30,
+                    jury_repair_attempts=1,
+                ),
+                synthesis_provider="alpha",
+            )
+
+            result = engine.run("Repair only the invalid jury prose.")
+
+            self.assertEqual(result["status"], "completed")
+            self.assertEqual(result["completion_quality"], "degraded")
+            self.assertEqual(result["failures"], [])
+            self.assertEqual(result["membership"]["valid_juries"], 3)
+            self.assertEqual(
+                result["membership"]["recovered_jury_repairs"], 1
+            )
+            self.assertEqual(
+                result["membership"]["recovered_truncations"], 0
+            )
+            repair = next(
+                item
+                for item in result["recoveries"]
+                if item.get("kind") == "jury_artifact_repair"
+            )
+            self.assertEqual(repair["provider"], "alpha")
+            self.assertEqual(repair["status"], "recovered")
+            self.assertTrue(repair["decision_preserved"])
+            self.assertEqual(
+                repair["repair_resolved_model"], "repair-fallback-model"
+            )
+            alpha_judgment = next(
+                jury for jury in result["juries"] if jury["juror"] == "alpha"
+            )
+            self.assertEqual(
+                alpha_judgment["juror_model"],
+                providers["alpha"].config.model,
+            )
+            invocations = store.list_invocations(result["run_id"])
+            alpha_jury = next(
+                item
+                for item in invocations
+                if item["provider"] == "alpha"
+                and item["stage"] == "jury"
+            )
+            alpha_repair = next(
+                item
+                for item in invocations
+                if item["provider"] == "alpha"
+                and item["stage"] == "jury_repair"
+            )
+            self.assertEqual(
+                len(json.loads(alpha_jury["response_text"])["rationale"]),
+                1_001,
+            )
+            self.assertLessEqual(
+                len(json.loads(alpha_repair["response_text"])["rationale"]),
+                1_000,
+            )
+            self.assertEqual(
+                alpha_repair["resolved_model"], "repair-fallback-model"
+            )
+            self.assertEqual(store.count_calls(result["run_id"]), 8)
+            calls_before = {
+                name: list(provider.calls)
+                for name, provider in providers.items()
+            }
+
+            resumed = engine.resume(result["run_id"])
+
+            self.assertEqual(resumed, result)
+            self.assertEqual(
+                calls_before,
+                {name: provider.calls for name, provider in providers.items()},
+            )
+
+    def test_successful_jury_repair_is_reused_after_interrupted_run(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            providers: dict[str, FakeProvider] = {
+                "alpha": OversizedJuryProvider("alpha"),
+                "beta": FakeProvider("beta"),
+                "gamma": FakeProvider("gamma"),
+            }
+            store = CouncilStore(Path(temporary))
+            engine = CouncilEngine(
+                store=store,
+                providers=providers,
+                policy=RunPolicy(
+                    proposal_quorum=2,
+                    jury_quorum=2,
+                    min_lineages=2,
+                    max_calls=8,
+                    deadline_seconds=30,
+                    jury_repair_attempts=1,
+                ),
+                synthesis_provider="alpha",
+            )
+            original_lock = engine._lock_adjudication
+
+            def interrupt_after_repair(*args: object, **kwargs: object) -> None:
+                raise RuntimeError("synthetic interruption after repair")
+
+            engine._lock_adjudication = interrupt_after_repair  # type: ignore[method-assign]
+            with self.assertRaisesRegex(RuntimeError, "after repair"):
+                engine.run("Reuse a completed repair after interruption.")
+            run_id = store.list_runs()[0]["run_id"]
+            self.assertEqual(store.count_calls(run_id), 7)
+            self.assertEqual(providers["alpha"].calls.count("jury"), 2)
+            engine._lock_adjudication = original_lock  # type: ignore[method-assign]
+
+            resumed = engine.resume(run_id)
+
+            self.assertEqual(resumed["status"], "completed")
+            self.assertEqual(resumed["membership"]["valid_juries"], 3)
+            self.assertEqual(
+                resumed["membership"]["recovered_jury_repairs"], 1
+            )
+            self.assertEqual(store.count_calls(run_id), 8)
+            self.assertEqual(providers["alpha"].calls.count("jury"), 2)
+            self.assertEqual(providers["alpha"].calls.count("synthesis"), 1)
+            repair_events = [
+                event
+                for event in store.list_events(run_id)
+                if event["event_type"] == "jury_artifact_repair"
+            ]
+            self.assertEqual(len(repair_events), 1)
+
+    def test_undispatched_deadline_failure_can_repair_on_resume(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            providers: dict[str, FakeProvider] = {
+                "alpha": OversizedJuryProvider("alpha"),
+                "beta": FakeProvider("beta"),
+                "gamma": FakeProvider("gamma"),
+            }
+            store = CouncilStore(Path(temporary))
+            engine = CouncilEngine(
+                store=store,
+                providers=providers,
+                policy=RunPolicy(
+                    proposal_quorum=2,
+                    jury_quorum=2,
+                    min_lineages=2,
+                    max_calls=10,
+                    deadline_seconds=30,
+                    jury_repair_attempts=1,
+                ),
+                synthesis_provider="alpha",
+            )
+            run_id = engine.create_run("Resume an undispatched repair.")
+            labels = [
+                "CANDIDATE_01",
+                "CANDIDATE_02",
+                "CANDIDATE_03",
+            ]
+            mapping = {
+                label: provider
+                for label, provider in zip(labels, providers, strict=True)
+            }
+            invalid_response = ProviderResponse(
+                content=json.dumps(
+                    {
+                        "winner": labels[0],
+                        "ranking": labels,
+                        "confidence": "medium",
+                        "abstain": False,
+                        "rationale": "x" * 1_001,
+                        "material_disagreements": [],
+                        "verification_needed": ["Run the fixture."],
+                    }
+                ),
+                resolved_model=providers["alpha"].config.model,
+                request_id="initial-alpha-jury",
+                usage=Usage(
+                    input_tokens=10,
+                    output_tokens=20,
+                    total_tokens=30,
+                ),
+                latency_ms=5,
+                attempts=1,
+                finish_reason="stop",
+            )
+
+            first_records, first_failures, first_recoveries = (
+                engine._parse_and_repair_juries(
+                    run_id=run_id,
+                    candidate_mapping=mapping,
+                    presentation_orders={"alpha": labels},
+                    jury_responses={"alpha": invalid_response},
+                    deadline=time.monotonic() - 1,
+                )
+            )
+
+            self.assertFalse(first_records[0]["valid"])
+            self.assertEqual(len(first_failures), 1)
+            self.assertEqual(first_recoveries[0]["status"], "not_attempted")
+            self.assertEqual(store.list_invocations(run_id), [])
+            self.assertFalse(
+                any(
+                    event["event_type"] == "jury_artifact_repair"
+                    for event in store.list_events(run_id)
+                )
+            )
+
+            records, failures, recoveries = engine._parse_and_repair_juries(
+                run_id=run_id,
+                candidate_mapping=mapping,
+                presentation_orders={"alpha": labels},
+                jury_responses={"alpha": invalid_response},
+                deadline=time.monotonic() + 5,
+            )
+
+            self.assertTrue(records[0]["valid"])
+            self.assertEqual(failures, [])
+            self.assertEqual(recoveries[0]["status"], "recovered")
+            self.assertEqual(store.count_calls(run_id), 1)
+            self.assertEqual(providers["alpha"].calls.count("jury"), 1)
+
+    def test_jury_repair_that_changes_vote_is_rejected_and_not_retried(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            providers: dict[str, FakeProvider] = {
+                "alpha": OversizedJuryProvider(
+                    "alpha", change_repair_decision=True
+                ),
+                "beta": FakeProvider("beta"),
+                "gamma": FakeProvider("gamma"),
+            }
+            store = CouncilStore(Path(temporary))
+            engine = CouncilEngine(
+                store=store,
+                providers=providers,
+                policy=RunPolicy(
+                    proposal_quorum=2,
+                    jury_quorum=3,
+                    min_lineages=2,
+                    max_calls=10,
+                    deadline_seconds=30,
+                    jury_repair_attempts=1,
+                ),
+                synthesis_provider="alpha",
+            )
+
+            first = engine.run("Reject a repair that changes the vote.")
+
+            self.assertEqual(first["status"], "partial")
+            self.assertEqual(first["membership"]["valid_juries"], 2)
+            self.assertEqual(providers["alpha"].calls.count("jury"), 2)
+            self.assertIn(
+                "repair changed immutable jury decision fields",
+                next(
+                    failure["message"]
+                    for failure in first["failures"]
+                    if failure["provider"] == "alpha"
+                ),
+            )
+
+            resumed = engine.resume(first["run_id"])
+
+            self.assertEqual(resumed["status"], "partial")
+            self.assertEqual(providers["alpha"].calls.count("jury"), 2)
+            self.assertEqual(
+                len(
+                    [
+                        item
+                        for item in store.list_invocations(first["run_id"])
+                        if item["provider"] == "alpha"
+                        and item["stage"] == "jury_repair"
+                    ]
+                ),
+                1,
+            )
+
+    def test_failed_jury_repair_is_not_retried_on_resume(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            providers: dict[str, FakeProvider] = {
+                "alpha": OversizedJuryProvider(
+                    "alpha", fail_repair=True
+                ),
+                "beta": FakeProvider("beta"),
+                "gamma": FakeProvider("gamma"),
+            }
+            store = CouncilStore(Path(temporary))
+            engine = CouncilEngine(
+                store=store,
+                providers=providers,
+                policy=RunPolicy(
+                    proposal_quorum=2,
+                    jury_quorum=3,
+                    min_lineages=2,
+                    max_calls=10,
+                    deadline_seconds=30,
+                    jury_repair_attempts=1,
+                ),
+                synthesis_provider="alpha",
+            )
+
+            first = engine.run("Do not retry a failed jury repair.")
+            self.assertEqual(first["status"], "partial")
+            self.assertEqual(providers["alpha"].calls.count("jury"), 2)
+
+            resumed = engine.resume(first["run_id"])
+
+            self.assertEqual(resumed["status"], "partial")
+            self.assertEqual(providers["alpha"].calls.count("jury"), 2)
+            repair = next(
+                item
+                for item in resumed["recoveries"]
+                if item.get("kind") == "jury_artifact_repair"
+            )
+            self.assertEqual(repair["status"], "failed")
+
+    def test_ambiguous_jury_repair_outcome_is_stable_on_resume(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            providers: dict[str, FakeProvider] = {
+                "alpha": OversizedJuryProvider(
+                    "alpha", ambiguous_repair=True
+                ),
+                "beta": FakeProvider("beta"),
+                "gamma": FakeProvider("gamma"),
+            }
+            store = CouncilStore(Path(temporary))
+            engine = CouncilEngine(
+                store=store,
+                providers=providers,
+                policy=RunPolicy(
+                    proposal_quorum=2,
+                    jury_quorum=3,
+                    min_lineages=2,
+                    max_calls=10,
+                    deadline_seconds=30,
+                    jury_repair_attempts=1,
+                ),
+                synthesis_provider="alpha",
+            )
+
+            first = engine.run("Do not retry an ambiguous jury repair.")
+            first_repair = next(
+                item
+                for item in first["recoveries"]
+                if item.get("kind") == "jury_artifact_repair"
+            )
+            self.assertEqual(first["status"], "partial")
+            self.assertEqual(first_repair["status"], "failed")
+            self.assertEqual(providers["alpha"].calls.count("jury"), 2)
+
+            resumed = engine.resume(first["run_id"])
+
+            resumed_repair = next(
+                item
+                for item in resumed["recoveries"]
+                if item.get("kind") == "jury_artifact_repair"
+            )
+            self.assertEqual(resumed["status"], "partial")
+            self.assertEqual(resumed_repair, first_repair)
+            self.assertEqual(providers["alpha"].calls.count("jury"), 2)
+            self.assertEqual(
+                len(
+                    [
+                        event
+                        for event in store.list_events(first["run_id"])
+                        if event["event_type"] == "jury_artifact_repair"
+                    ]
+                ),
+                1,
+            )
+
+    def test_jury_repair_reserves_the_final_call_for_synthesis(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            providers: dict[str, FakeProvider] = {
+                "alpha": OversizedJuryProvider("alpha"),
+                "beta": FakeProvider("beta"),
+                "gamma": FakeProvider("gamma"),
+            }
+            store = CouncilStore(Path(temporary))
+            engine = CouncilEngine(
+                store=store,
+                providers=providers,
+                policy=RunPolicy(
+                    proposal_quorum=2,
+                    jury_quorum=2,
+                    min_lineages=2,
+                    max_calls=7,
+                    deadline_seconds=30,
+                    jury_repair_attempts=1,
+                ),
+                synthesis_provider="alpha",
+            )
+
+            result = engine.run("Reserve the synthesis call.")
+
+            self.assertEqual(result["status"], "completed")
+            self.assertEqual(store.count_calls(result["run_id"]), 7)
+            self.assertEqual(providers["alpha"].calls.count("jury"), 1)
+            repair = next(
+                item
+                for item in result["recoveries"]
+                if item.get("kind") == "jury_artifact_repair"
+            )
+            self.assertEqual(repair["status"], "not_attempted")
+            self.assertEqual(
+                repair["reason"], "call budget reserved for synthesis"
             )
 
     def test_candidate_namespace_is_stable_across_juries(self) -> None:
@@ -1203,6 +1731,24 @@ class CouncilEngineTests(unittest.TestCase):
             )
 
             with self.assertRaisesRegex(ValueError, "run lock"):
+                changed_engine.resume(result["run_id"])
+
+    def test_lock_rejects_changed_provider_order(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            engine, providers, store = self._engine(Path(temporary))
+            result = engine.run("Lock provider repair priority")
+            reordered = {
+                name: providers[name]
+                for name in ("gamma", "beta", "alpha")
+            }
+            changed_engine = CouncilEngine(
+                store=store,
+                providers=reordered,
+                policy=engine.policy,
+                synthesis_provider="alpha",
+            )
+
+            with self.assertRaisesRegex(ValueError, "order"):
                 changed_engine.resume(result["run_id"])
 
     def test_lock_rejects_changed_policy_or_synthesis_provider(self) -> None:
