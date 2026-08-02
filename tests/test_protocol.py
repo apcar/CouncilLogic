@@ -61,6 +61,24 @@ class ProposalParsingTests(unittest.TestCase):
 
         self.assertEqual(parsed, value)
 
+    def test_accepts_four_evidence_items_and_rejects_five(self) -> None:
+        boundary = proposal()
+        boundary["evidence_and_reasoning"] = [
+            f"Material reason {index}." for index in range(4)
+        ]
+
+        parsed = parse_proposal(json.dumps(boundary))
+
+        self.assertEqual(len(parsed["evidence_and_reasoning"]), 4)
+        boundary["evidence_and_reasoning"].append(
+            "A fifth material reason."
+        )
+        with self.assertRaisesRegex(
+            ValueError,
+            "evidence_and_reasoning must contain at most 4 items",
+        ):
+            parse_proposal(json.dumps(boundary))
+
     def test_rejects_oversized_or_extra_proposal_fields(self) -> None:
         oversized = proposal()
         oversized["outcome"] = "x" * 601
@@ -381,8 +399,22 @@ class PromptAndIdentityTests(unittest.TestCase):
             "verification_needed items and at most two uncertainty items",
             proposal_system,
         )
-        self.assertIn("rewrite it shorter before returning", proposal_system)
-        self.assertIn("hard limits still apply", proposal_system)
+        self.assertIn(
+            "A numbered request\n"
+            "or a requested number of deliverables",
+            proposal_system,
+        )
+        self.assertIn(
+            "does not change these\n"
+            "array limits or require one array item per requested deliverable",
+            proposal_system,
+        )
+        self.assertIn("merge or remove lower-priority", proposal_system)
+        self.assertIn(
+            "absolute maxima are four evidence_and_reasoning items, three\n"
+            "uncertainty items, and four verification_needed items",
+            proposal_system,
+        )
         self.assertIn("untrusted question data", proposal_user)
         self.assertIn("metadata-blind", jury_system)
         self.assertIn('"winner"', jury_system)
@@ -403,10 +435,10 @@ class PromptAndIdentityTests(unittest.TestCase):
 
     def test_protocol_identity_and_stable_hash(self) -> None:
         self.assertEqual(PROTOCOL_ID, "independent-jury")
-        self.assertEqual(PROTOCOL_VERSION, "1.2.0-beta")
+        self.assertEqual(PROTOCOL_VERSION, "1.2.1-beta")
         self.assertEqual(
             protocol_hash(),
-            "75d54e3b70065da230715501b3bebb602e7cae7ab6c8185dd94bac15e1e6da4d",
+            "3c9b50e41bc1aa8fa1bea769c98ee4d6908b63f586c78d95b9097e0604503ee6",
         )
 
 

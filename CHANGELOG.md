@@ -35,6 +35,13 @@ All notable public changes to CouncilLogic are recorded here.
 
 ### Changed
 
+- The `1.2.1-beta` proposal prompt now decouples requested or numbered
+  deliverable counts from proposal array lengths, requires a final
+  count-and-merge pass, and states every absolute item limit while retaining
+  the three/two/three target and four/three/four hard-limit margins.
+- The default Cohere configuration now pins temperature to zero for more
+  predictable bounded structured output. Operators can still set an explicit
+  Cohere temperature in file-backed configuration.
 - Anthropic structured-output requests now remove provider-unsupported length
   and item-count schema constraints at the adapter boundary, carry those
   bounds forward in field descriptions, and retain the canonical bounded

@@ -153,6 +153,9 @@ def _default_provider(name: str) -> ProviderConfig:
         # jury allowance still leaves more than Cohere's recommended 1,000
         # tokens for the visible response.
         extra["thinking"] = {"token_budget": 800}
+        # Cohere cannot decoder-enforce CouncilLogic's array-item bounds.
+        # Zero-temperature sampling reduces count drift in structured artifacts.
+        extra["temperature"] = 0
     elif name == "upstage":
         # Solar Pro 3 medium/high reasoning reserves at least 4,096/8,192
         # tokens. Low disables reasoning and fits the bounded council stages.

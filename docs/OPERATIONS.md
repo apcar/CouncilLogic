@@ -220,6 +220,12 @@ but a normal clean run still makes fifteen calls. Successful stage/provider
 slots are reused on resume. The mock-only service remains a four-lineage,
 nine-call fixture.
 
+The default Cohere configuration pins `temperature = 0` because Cohere's
+structured-output subset cannot enforce array item counts. This reduces count
+drift while local validation remains authoritative. A file-backed Cohere
+section inherits this default unless its `extra` table explicitly overrides
+`temperature`.
+
 ## Policy controls
 
 The defaults are:
@@ -419,10 +425,11 @@ atomically preserved in the audit log. The final result and Markdown export
 report each application-level retry as recovered, failed, ambiguous, or still
 in progress; a recovered retry therefore remains `completion_quality=degraded`.
 
-Resume refuses a run when the protocol hash or the
-provider/model/lineage/endpoint lock differs from the current application.
-Keep the original release and configuration until important partial runs are
-finished or exported.
+Resume refuses a run when the protocol hash or the entire ordered provider
+configuration lock differs from the current application. That lock includes
+models, lineages, endpoints, stage budgets, and provider-specific options such
+as temperature. Keep the original release and configuration until important
+partial runs are finished or exported.
 
 The alpha does not include a run-lock migration command. Do not edit the
 SQLite database to force compatibility. Resume still resolves the stored
@@ -494,6 +501,14 @@ repair-input size. Missing or ambiguous decisions, multiple objects, oversized
 inputs, failed repairs, and repairs that change any decision field remain
 invalid and excluded. Inspect both invocation records and the
 `jury_artifact_repair` event; prose meaning is not mechanically provable.
+
+Proposal evidence has a three-item prompt target and a four-item hard ceiling.
+The extra slot is tolerance for provider drift, not a request to fill four
+items, and the ceiling is an engineering bound on comparability and downstream
+prompt growth rather than a research-derived semantic optimum. Cohere cannot
+decoder-enforce JSON Schema `maxItems`; its zero-temperature default and the
+explicit count instruction improve compliance, while canonical local
+validation still excludes any over-limit artifact.
 
 ### Workload preflight rejected
 
@@ -619,11 +634,14 @@ Model changes create a new provider lock. Before changing a pinned model:
 Protocol code changes alter the immutable protocol hash and intentionally block
 old-run resume. Treat them as release changes, not live edits.
 
-The 1.2.0-beta protocol's 1,000-character rationale bound and optional jury repair
-apply only to newly created runs. They do not revalidate, repair, or recompute
-1.1.x records; preserve the older installation for any unfinished old run,
-export important completed records before rollout, and use a fresh idempotency
-key for a new 1.2.0-beta run.
+`1.2.0-beta` introduced the 1,000-character jury rationale bound and optional
+jury repair. `1.2.1-beta` retains those behaviors and clarifies that requested
+deliverable counts do not determine proposal array lengths; the evidence target
+remains three and its hard maximum remains four. Protocol changes apply only to
+newly created runs and do not revalidate, repair, or recompute earlier records.
+Preserve the matching older installation for unfinished earlier runs, export
+important completed records before rollout, and use a fresh idempotency key for
+a new `1.2.1-beta` run.
 
 ## Retention and deletion
 

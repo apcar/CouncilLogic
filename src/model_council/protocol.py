@@ -15,7 +15,7 @@ from typing import Any
 
 
 PROTOCOL_ID = "independent-jury"
-PROTOCOL_VERSION = "1.2.0-beta"
+PROTOCOL_VERSION = "1.2.1-beta"
 CANDIDATE_LABEL_PREFIX = "CANDIDATE_"
 
 PROPOSAL_OUTCOME_MAX_CHARS = 600
@@ -60,10 +60,16 @@ Keep every field concise and complete. Prioritize a valid finished object over
 additional detail. Target no more than 350 characters in outcome, 180
 characters per evidence_and_reasoning item, and 120 characters per uncertainty
 or verification_needed item. Target at most three evidence_and_reasoning and
-verification_needed items and at most two uncertainty items. If a draft exceeds
-one of those targets, rewrite it shorter before returning. The schema permits
-modest headroom beyond the targets, but its hard limits still apply: never pad a
-field to its limit. Do not add keys. Do not force certainty."""
+verification_needed items and at most two uncertainty items. A numbered request
+or a requested number of deliverables in the question does not change these
+array limits or require one array item per requested deliverable. State the
+complete recommendation compactly in outcome; use the arrays only for the
+strongest supporting reasons, uncertainties, and checks. Before returning,
+count each array. If a draft exceeds a target, merge or remove lower-priority
+items until it meets that target. The schema permits modest headroom beyond the
+targets, but the absolute maxima are four evidence_and_reasoning items, three
+uncertainty items, and four verification_needed items. Never pad a field to its
+limit. Do not add keys. Do not force certainty."""
 
 
 _PROPOSAL_USER_TEMPLATE = """\

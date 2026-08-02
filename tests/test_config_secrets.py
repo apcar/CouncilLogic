@@ -106,6 +106,7 @@ class ConfigurationTests(unittest.TestCase):
             cohere.extra["thinking"],
             {"token_budget": 800},
         )
+        self.assertEqual(cohere.extra["temperature"], 0)
         self.assertNotIn(
             "upstage",
             {provider.name for provider in config.providers},
@@ -164,6 +165,12 @@ class ConfigurationTests(unittest.TestCase):
         self.assertEqual(config.policy.max_parallel_calls, 5)
         self.assertEqual(config.policy.deadline_seconds, 900.0)
         self.assertEqual(config.policy.jury_repair_attempts, 1)
+        cohere = next(
+            provider
+            for provider in config.providers
+            if provider.name == "cohere"
+        )
+        self.assertEqual(cohere.extra["temperature"], 0)
 
     def test_example_config_can_enable_full_eight_provider_bench(self) -> None:
         example = (PROJECT_ROOT / "council.example.toml").read_text(
@@ -239,6 +246,41 @@ model = "command-a-plus-05-2026"
                 ],
             )
             self.assertEqual(config.policy.max_calls, 20)
+            cohere = next(
+                provider
+                for provider in config.providers
+                if provider.name == "cohere"
+            )
+            self.assertEqual(cohere.extra["temperature"], 0)
+            self.assertEqual(
+                cohere.extra["thinking"],
+                {"token_budget": 800},
+            )
+
+    def test_file_config_can_override_default_cohere_temperature(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "config.toml"
+            path.write_text(
+                """
+[providers.cohere]
+model = "command-a-plus-05-2026"
+extra = { temperature = 0.3 }
+""",
+                encoding="utf-8",
+            )
+
+            config = load_config(path)
+
+            cohere = next(
+                provider
+                for provider in config.providers
+                if provider.name == "cohere"
+            )
+            self.assertEqual(cohere.extra["temperature"], 0.3)
+            self.assertEqual(
+                cohere.extra["thinking"],
+                {"token_budget": 800},
+            )
 
     def test_file_config_can_enable_optional_upstage_provider(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
