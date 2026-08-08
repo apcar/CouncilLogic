@@ -16,6 +16,7 @@ from urllib.request import HTTPRedirectHandler, Request, build_opener
 import uuid
 
 from model_council.models import ErrorCategory, ProviderError
+from model_council.version import PACKAGE_VERSION
 
 
 @dataclass(frozen=True)
@@ -234,7 +235,7 @@ class JsonHttpClient:
         safe_headers = {
             "Accept": "application/json",
             "Content-Type": "application/json",
-            "User-Agent": "model-council/0.2.0a1",
+            "User-Agent": f"model-council/{PACKAGE_VERSION}",
             "X-Client-Request-Id": client_request_id,
             **dict(headers),
         }

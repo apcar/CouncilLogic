@@ -22,12 +22,18 @@ from .providers.factory import create_provider
 from .run_lock import ServiceLock
 from .secrets import SecretResolver, default_secret_resolver
 from .store import CouncilStore, service_managed_data_dir
+from .version import PACKAGE_VERSION
 
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="council",
         description="Run an auditable council of heterogeneous language models.",
+    )
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=f"%(prog)s {PACKAGE_VERSION}",
     )
     parser.add_argument("--config", help="Path to a council TOML configuration")
     parser.add_argument(

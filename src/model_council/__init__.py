@@ -7,6 +7,7 @@ from .models import (
     RunPolicy,
     Usage,
 )
+from .version import PACKAGE_VERSION
 
 __all__ = [
     "ErrorCategory",
@@ -16,4 +17,4 @@ __all__ = [
     "Usage",
 ]
 
-__version__ = "0.2.0a1"
+__version__ = PACKAGE_VERSION

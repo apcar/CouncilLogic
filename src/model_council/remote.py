@@ -18,6 +18,8 @@ from urllib.request import (
     build_opener,
 )
 
+from .version import PACKAGE_VERSION
+
 
 _LOOPBACK_HOSTS = {"127.0.0.1", "::1", "localhost"}
 _TERMINAL_STATES = {"completed", "partial", "failed", "cancelled"}
@@ -170,7 +172,7 @@ class RemoteCouncilClient:
     ) -> dict[str, Any]:
         headers = {
             "Accept": "application/json",
-            "User-Agent": "model-council-remote/0.2.0a1",
+            "User-Agent": f"model-council-remote/{PACKAGE_VERSION}",
         }
         if authenticated:
             headers["Authorization"] = f"Bearer {self._token}"

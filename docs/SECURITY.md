@@ -2,12 +2,16 @@
 
 ## Public-alpha posture
 
-CouncilLogic `0.2.0a1` adds a hardened, governed service alpha to the
-single-user local CLI. The service is mock-only, loopback-only, and must not be
-exposed as a public network daemon. It has application-level multi-principal
-controls, but it is not a production identity, billing, or Internet-facing
-system. Live service, Cloudflare or another remote front door, work use, and
-commercial use remain gated.
+CouncilLogic `0.3.0a1` retains the hardened, governed `0.2.0a1` mock-service
+profile alongside the single-user live CLI. The service is mock-only,
+loopback-only, and must not be exposed as a public network daemon. It has
+application-level multi-principal controls, but it is not a production
+identity, billing, or Internet-facing system. Live service, a remote front
+door, work use, and commercial service use remain gated.
+
+These are application-level controls, not a compliance certification,
+enterprise security assessment, or substitute for provider and data-governance
+review.
 
 The seven-provider CLI is a separate surface. Local tests and prior live checks
 do not remove the alpha boundaries below, establish current provider health,

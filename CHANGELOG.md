@@ -4,8 +4,19 @@ All notable public changes to CouncilLogic are recorded here.
 
 ## Unreleased
 
+No public changes yet.
+
+## [0.3.0a1] - 2026-08-08
+
+This alpha expands the visible live council from five to seven default
+lineages. The substantive change is that the fifteen-call decision is now
+preflighted and governed as one bounded, recoverable process with explicit
+degradation and an inspectable audit record.
+
 ### Added
 
+- A credential-free governance-path proof and a `council --version` surface,
+  backed by release-metadata consistency checks.
 - xAI's Grok 4.5 as a fifth live CLI provider, using the Responses API,
   structured jury output, official-host restriction, external-only
   `XAI_API_KEY` resolution, and provider-reported cost metadata.
@@ -35,6 +46,9 @@ All notable public changes to CouncilLogic are recorded here.
 
 ### Changed
 
+- The repository landing page now front-loads the operating thesis, runnable
+  proof, system flow, public/private boundary, and claim limits before the
+  detailed implementation mechanics.
 - The `1.2.1-beta` proposal prompt now decouples requested or numbered
   deliverable counts from proposal array lengths, requires a final
   count-and-merge pass, and states every absolute item limit while retaining
@@ -98,6 +112,17 @@ All notable public changes to CouncilLogic are recorded here.
 - The mock-only `0.2.0a1` service remains frozen at four deterministic
   lineages and nine logical calls.
 
+### Boundaries
+
+- Seven live lineages broaden the engineering test surface; they are not
+  evidence that fifteen calls outperform one strong model.
+- The `0.3.0a1` package retains the mock-only, loopback-only `0.2.0a1`
+  service profile. It is not a hosted or production service.
+- Logical-call, prompt, concurrency, deadline, and recovery limits are not
+  monetary budgets or provider-billing reconciliation.
+- Current provider availability, pricing, and structured-output behavior must
+  be verified against official documentation and direct canaries before use.
+
 ## [0.2.0a1] - 2026-07-26
 
 Initial public alpha.
@@ -128,4 +153,6 @@ Initial public alpha.
 - External pull requests and copyrightable contributions remain closed until
   a counsel-reviewed contributor license agreement is available.
 
-[0.2.0a1]: https://github.com/apcar/CouncilLogic/releases/tag/v0.2.0a1
+[Unreleased]: https://github.com/apcar/CouncilLogic/compare/v0.3.0a1...HEAD
+[0.3.0a1]: https://github.com/apcar/CouncilLogic/releases/tag/v0.3.0a1
+[0.2.0a1]: https://github.com/apcar/CouncilLogic/tree/v0.2.0a1

@@ -22,7 +22,25 @@ live adapters for OpenAI, Anthropic, Gemini, Mistral, xAI's Grok, Alibaba's
 Qwen, and Cohere Command. An Upstage Solar adapter is available as an optional,
 disabled bench provider.
 
-This repository is a **public alpha (`0.2.0a1`)**, not a production service or
+## The operating thesis
+
+CouncilLogic is a working expression of how I approach AI systems: separate
+judgment from authority, make disagreement visible, bound work and failure
+before execution, and preserve a record another operator can inspect.
+
+| Principle | Implemented evidence |
+|---|---|
+| Separate judgment from authority | Distinct provider/model lineages answer independently; models receive no tools or permission to act. |
+| Define limits before execution | Prompt growth, logical calls, concurrency, deadlines, output, and recovery are bounded by policy. |
+| Preserve uncertainty | Metadata-blind juries, deterministic aggregation, abstentions, ties, disagreement, and degraded completion remain visible. |
+| Make operation inspectable | Proposals, juries, failures, recoveries, policy, aggregate, and synthesis are durably recorded and exportable. |
+
+The fastest review path is to run the
+[credential-free proof](#five-minute-credential-free-proof), then inspect the
+[security model](docs/SECURITY.md), [operations runbook](docs/OPERATIONS.md),
+and [research boundaries](docs/RESEARCH.md).
+
+This repository is a **public alpha (`0.3.0a1`)**, not a production service or
 a truth oracle. Multiple models can share the same error. Verify consequential
 claims against primary sources.
 
@@ -33,11 +51,13 @@ juries, debate, voting, blinded labels, and synthesis predate this project; the
 workflow is a governed descendant of the council pattern popularized by
 [Karpathy's `llm-council`](https://github.com/karpathy/llm-council).
 
-The contribution is the control plane around that pattern: attributable
-principal identity, action-scoped mandates, owner-scoped access, bounded
-logical-invocation budgets, durable audit records, restart recovery,
-idempotency, token rotation and revocation, single-writer fencing, and explicit
-operator authority.
+The contribution is the control discipline around that pattern, implemented on
+two deliberately separate surfaces. The live CLI provides bounded
+heterogeneous runs, durable audit records, restart recovery, and explicit
+failure semantics. The frozen mock-only service separately exercises principal
+identity, action-scoped mandates, owner-scoped access, idempotency, token
+rotation and revocation, logical-invocation reservations, and single-writer
+fencing.
 
 ### Why I built it
 
@@ -66,49 +86,32 @@ See [Research](docs/RESEARCH.md).
 4. **Synthesize:** the selected lineage receives bounded candidates, the
    aggregate, and compact vote records and writes the final answer.
 
+```mermaid
+flowchart LR
+    Q["Question"] --> G{"Policy preflight"}
+    G --> P["Independent proposals"]
+    P --> J["Metadata-blind juries"]
+    J --> A["Deterministic aggregate"]
+    A --> S["Bounded synthesis"]
+    P --> R[("Durable local record")]
+    J --> R
+    A --> R
+    S --> R
+    R --> O["Inspect · resume · export"]
+```
+
 A default live run uses fifteen application-level calls: seven proposals,
-seven juries, and one synthesis. Mock mode and the frozen `0.2.0a1` service
-reference topology remain four-lineage, nine-call fixtures. Successful work is
-persisted and reused on resume. The application does not give models tools,
-web access, code execution, or model-initiated actions.
+seven juries, and one synthesis. The frozen `0.2.0a1` mock-service profile
+remains a four-lineage, nine-call fixture. Successful work is persisted and
+reused on resume. The application does not give models tools, web access, code
+execution, or model-initiated actions.
 
-## Workload reliability
+## Five-minute credential-free proof
 
-Before the first provider call, CouncilLogic deterministically projects the
-largest prompt each stage can produce from the configured participant count
-and protocol bounds. It rejects a question when either the input itself or the
-projected downstream prompt graph exceeds policy, so an oversized run fails
-before incurring provider cost.
-
-Providers have separate proposal, jury, and synthesis output-token and request
-timeout budgets. At most five provider calls run simultaneously by default,
-and Qwen receives longer bounded stage timeouts for long council prompts. Known
-`finish_reason=length` completions may receive one
-larger-output retry when the run still has call, deadline, and recovery budget.
-The truncated response is first preserved as an audit event. Ambiguous
-timeouts, connection losses, and interrupted running calls are never retried
-automatically.
-
-Jury rationales target 400 characters and have a 1,000-character hard limit.
-When enabled, a completed jury artifact with valid vote fields but invalid
-free-text fields may receive one same-provider, prose-only repair. The repair
-must preserve winner, ranking, confidence, and abstention exactly; the original
-and repaired responses remain separate audit records. It consumes one shared
-`max_calls` unit, never receives a repair-of-repair or output-length retry, and
-cannot consume the call reserved for synthesis. Because accepting a repaired
-ballot can change the aggregate relative to excluding it, any repaired run is
-reported as degraded.
-
-Every terminal result reports `completion_quality` as `clean` or `degraded`,
-membership counts, recovery records, projected and actual prompt sizes, and
-application-level call count. A completed synthesis can therefore be
-distinguished from a clean council run; partial and failed runs are always
-degraded.
-
-## Five-minute credential-free quickstart
-
-Requires Python 3.11 or newer. Mock mode is deterministic, makes no provider
-requests, and needs no credentials.
+Requires Python 3.11 or newer. Mock mode uses deterministic local provider
+responses, makes no provider requests, and needs no credentials. It proves the
+governed execution and audit path; it does not produce substantive model
+advice.
 
 ```bash
 git clone https://github.com/apcar/CouncilLogic.git
@@ -117,12 +120,20 @@ python3 -m venv .venv
 . .venv/bin/activate
 python -m pip install -e .
 
+council --version
 council --mock --data-dir ./work/demo doctor
 council --mock --data-dir ./work/demo run \
-  --question "What should I verify before relying on this council?" \
+  --question "What controls must be in place before an AI agent receives write access to a consequential business workflow?" \
   --json
 council --mock --data-dir ./work/demo list
 ```
+
+The run produces four proposals, four separately ordered juries, one
+deterministic aggregation step, and one synthesis. The durable result records a
+clean nine-call execution, zero failed providers, and every verification
+limitation. Run-scoped presentation order means scores, winner or tie, and
+consensus classification can vary; each outcome is preserved exactly. See the
+[annotated proof](examples/mock-governance-proof/README.md).
 
 Use the returned `run_id` to inspect or export the durable record:
 
@@ -131,6 +142,24 @@ council --mock --data-dir ./work/demo inspect RUN_ID --json
 council --mock --data-dir ./work/demo export RUN_ID \
   --format markdown --output ./work/demo-run.md
 ```
+
+## Workload reliability
+
+- Before any provider call, deterministic preflight checks the question and
+  projected downstream prompt graph against locked policy bounds.
+- Proposal, jury, and synthesis calls have separate output and timeout limits;
+  shared call, concurrency, deadline, and recovery budgets cap the whole run.
+- A known output-length truncation may receive one bounded retry. Ambiguous
+  timeouts or connection loss are preserved and never retried automatically.
+- Jury prose repair cannot change decision fields, consume the synthesis
+  reserve, or trigger another repair. Any accepted repair makes the run
+  `degraded`, not silently successful.
+- Every terminal result exposes membership, failures, recoveries, projected and
+  actual workload, call count, and `clean` or `degraded` completion quality.
+
+The exact recovery precedence and operator gates are in
+[Operations](docs/OPERATIONS.md); the availability, privacy, and cost
+boundaries are in [Security](docs/SECURITY.md).
 
 ## Live CLI setup
 
@@ -153,8 +182,9 @@ council run --question "Your decision question"
 ```
 
 The default Qwen destination is Alibaba Model Studio's
-Singapore/International endpoint. `DASHSCOPE_API_KEY` must be issued for that
-region; Alibaba regional keys are not interchangeable.
+[Singapore/International endpoint](https://www.alibabacloud.com/help/en/model-studio/regions/).
+`DASHSCOPE_API_KEY` must be issued for that region; Alibaba regional keys are
+not interchangeable.
 
 Upstage is registered but disabled in `council.example.toml`. Enabling it adds
 an eighth participant, requires `UPSTAGE_API_KEY`, and should follow a direct
@@ -172,13 +202,25 @@ Default models and endpoints are recorded in
 change over time; verify them with the official provider documentation before
 a live run.
 
-## Service warning
+## Public project boundary
+
+This repository publishes the local council engine and protocol, mock execution
+and audit format, provider adapters, workload and failure controls, tests,
+packaging, and public documentation.
+
+Production deployment automation, live operational configuration and secret
+brokerage, private evaluation data and results, routing economics, and any
+hosted or enterprise control plane are outside this public repository. That is
+a publication boundary, not a roadmap or availability claim.
+
+## Experimental service boundary
 
 > [!WARNING]
-> The `0.2.0a1` HTTP service is **mock-only and loopback-only**. It cannot
-> construct live-provider adapters. Do not bind it to a non-loopback address,
-> place it behind a tunnel or remote front door, enable either work principal,
-> or use it for production or commercial traffic.
+> The `0.3.0a1` package retains the frozen `0.2.0a1` HTTP service profile.
+> It is **mock-only and loopback-only** and cannot construct live-provider
+> adapters. Do not bind it to a non-loopback address, place it behind a tunnel
+> or remote front door, enable either work principal, or use it for production
+> or commercial traffic.
 
 The fixed six-principal catalog is a public reference deployment for testing
 governance boundaries. It is not a claim that those principal names or that
@@ -221,8 +263,8 @@ and design implications.
 
 Bug reports and design proposals are welcome through the repository's issue
 forms. External pull requests and other copyrightable contributions are closed
-until a counsel-reviewed contributor license agreement is available. Please
-read [CONTRIBUTING.md](CONTRIBUTING.md) and the
+until a suitable contributor agreement is adopted. Please read
+[CONTRIBUTING.md](CONTRIBUTING.md) and the
 [Code of Conduct](CODE_OF_CONDUCT.md) before participating.
 
 ## License
