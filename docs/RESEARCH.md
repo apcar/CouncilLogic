@@ -64,6 +64,11 @@ Related protocol families remain useful comparison targets:
 7. Any future debate, critique-revision, confidence weighting, or
    mixture-of-agents protocol needs a distinct version and matched-cost
    evaluation before becoming a default.
+8. A prose-only jury repair is not a new evaluation, but accepting a repaired
+   ballot can change the aggregate relative to excluding it. Evaluations and
+   canaries should therefore report repair rate, added calls and cost, and any
+   outcome sensitivity rather than treating repair as invisible schema
+   hygiene.
 
 ## Interpreting additional lineages
 
@@ -78,11 +83,22 @@ broadens provider and model-family coverage and gives a three-of-five quorum
 tolerance for two unavailable lineages. It does not prove that five providers
 outperform four.
 
+The current default also adds Alibaba's Qwen and Cohere Command as the sixth
+and seventh lineages. A clean run therefore samples a broader set of vendors
+and model families, while a three-of-seven quorum can preserve a degraded
+result through four unavailable providers. Neither property proves that seven
+providers outperform five or that their errors are independent.
+
+Upstage Solar is implemented only as an optional disabled bench provider. Its
+presence in the adapter registry is not evaluation evidence and does not make
+it part of the default council.
+
 Treat each added lineage as an engineering hypothesis. Compare three-, four-,
-and five-lineage configurations on a fixed, blinded evaluation set; report
-accuracy, valid-jury rate, abstentions, ties, latency, and total provider cost;
-and keep the evidence separate. API compatibility and passing live canaries
-are useful release checks, not research evidence that the council is correct.
+five-, six-, and seven-lineage configurations on a fixed, blinded evaluation
+set; report accuracy, valid-jury rate, abstentions, ties, latency, and total
+provider cost; and keep the evidence separate. API compatibility and passing
+live canaries are useful release checks, not research evidence that the council
+is correct.
 
 ## Useful research and evaluation kits
 

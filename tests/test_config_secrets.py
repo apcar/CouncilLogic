@@ -14,6 +14,7 @@ from model_council.config import (  # noqa: E402
     default_config,
     load_config,
 )
+from model_council.models import RunPolicy  # noqa: E402
 from model_council.secrets import (  # noqa: E402
     ChainedSecretResolver,
     CommandSecretResolver,
@@ -22,16 +23,33 @@ from model_council.secrets import (  # noqa: E402
 
 
 class ConfigurationTests(unittest.TestCase):
-    def test_defaults_pin_five_current_lineages(self) -> None:
+    def test_run_policy_preserves_legacy_positional_field_order(self) -> None:
+        policy = RunPolicy(
+            2, 2, 2, 9, 4, 60.0, False, 1_000, 2_000, 0, 4_096
+        )
+
+        self.assertEqual(policy.truncation_retries, 0)
+        self.assertEqual(policy.max_recovery_output_tokens, 4_096)
+        self.assertEqual(policy.jury_repair_attempts, 0)
+
+    def test_defaults_pin_seven_current_lineages(self) -> None:
         config = default_config()
 
         self.assertEqual(
             [provider.name for provider in config.providers],
-            ["openai", "anthropic", "gemini", "mistral", "xai"],
+            [
+                "openai",
+                "anthropic",
+                "gemini",
+                "mistral",
+                "xai",
+                "qwen",
+                "cohere",
+            ],
         )
         self.assertEqual(
             len({provider.lineage for provider in config.providers}),
-            5,
+            7,
         )
         self.assertEqual(
             [provider.model for provider in config.providers],
@@ -41,10 +59,78 @@ class ConfigurationTests(unittest.TestCase):
                 DEFAULT_MODELS["gemini"],
                 DEFAULT_MODELS["mistral"],
                 DEFAULT_MODELS["xai"],
+                DEFAULT_MODELS["qwen"],
+                DEFAULT_MODELS["cohere"],
             ],
         )
+        self.assertEqual(config.policy.max_calls, 20)
+        self.assertEqual(config.policy.max_parallel_calls, 5)
+        self.assertEqual(config.policy.deadline_seconds, 900.0)
+        self.assertEqual(config.policy.jury_repair_attempts, 1)
+        for provider in config.providers:
+            self.assertEqual(
+                set(provider.stage_max_output_tokens),
+                {"proposal", "jury", "synthesis"},
+            )
+            self.assertEqual(
+                set(provider.stage_timeout_seconds),
+                {"proposal", "jury", "synthesis"},
+            )
+        gemini = next(
+            provider
+            for provider in config.providers
+            if provider.name == "gemini"
+        )
+        self.assertEqual(gemini.extra["thinking_level"], "low")
+        self.assertEqual(gemini.output_tokens_for("proposal"), 4096)
+        qwen = next(
+            provider
+            for provider in config.providers
+            if provider.name == "qwen"
+        )
+        self.assertFalse(qwen.extra["enable_thinking"])
+        self.assertEqual(
+            qwen.stage_timeout_seconds,
+            {
+                "proposal": 300.0,
+                "jury": 300.0,
+                "synthesis": 360.0,
+            },
+        )
+        cohere = next(
+            provider
+            for provider in config.providers
+            if provider.name == "cohere"
+        )
+        self.assertEqual(
+            cohere.extra["thinking"],
+            {"token_budget": 800},
+        )
+        self.assertEqual(cohere.extra["temperature"], 0)
+        self.assertNotIn(
+            "upstage",
+            {provider.name for provider in config.providers},
+        )
 
-    def test_legacy_file_config_does_not_silently_enable_xai(self) -> None:
+    def test_default_qwen_uses_singapore_international_route(self) -> None:
+        qwen = next(
+            provider
+            for provider in default_config().providers
+            if provider.name == "qwen"
+        )
+
+        self.assertEqual(qwen.model, "qwen3.7-max")
+        self.assertEqual(
+            qwen.endpoint,
+            (
+                "https://dashscope-intl.aliyuncs.com/"
+                "compatible-mode/v1/chat/completions"
+            ),
+        )
+
+    def test_legacy_file_config_does_not_silently_enable_new_providers(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "config.toml"
             path.write_text("[run]\nsynthesis_provider = \"openai\"\n")
@@ -55,6 +141,64 @@ class ConfigurationTests(unittest.TestCase):
                 [provider.name for provider in config.providers],
                 ["openai", "anthropic", "gemini", "mistral"],
             )
+            self.assertEqual(config.policy.max_calls, 16)
+            self.assertEqual(config.policy.max_parallel_calls, 5)
+            self.assertEqual(config.policy.deadline_seconds, 900.0)
+            self.assertEqual(config.policy.jury_repair_attempts, 0)
+
+    def test_example_config_activates_seven_and_parks_upstage(self) -> None:
+        config = load_config(PROJECT_ROOT / "council.example.toml")
+
+        self.assertEqual(
+            [provider.name for provider in config.providers],
+            [
+                "openai",
+                "anthropic",
+                "gemini",
+                "mistral",
+                "xai",
+                "qwen",
+                "cohere",
+            ],
+        )
+        self.assertEqual(config.policy.max_calls, 20)
+        self.assertEqual(config.policy.max_parallel_calls, 5)
+        self.assertEqual(config.policy.deadline_seconds, 900.0)
+        self.assertEqual(config.policy.jury_repair_attempts, 1)
+        cohere = next(
+            provider
+            for provider in config.providers
+            if provider.name == "cohere"
+        )
+        self.assertEqual(cohere.extra["temperature"], 0)
+
+    def test_example_config_can_enable_full_eight_provider_bench(self) -> None:
+        example = (PROJECT_ROOT / "council.example.toml").read_text(
+            encoding="utf-8"
+        )
+        enabled = example.replace("enabled = false", "enabled = true", 1)
+        self.assertNotEqual(enabled, example)
+
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "config.toml"
+            path.write_text(enabled, encoding="utf-8")
+
+            config = load_config(path)
+
+        self.assertEqual(
+            [provider.name for provider in config.providers],
+            [
+                "openai",
+                "anthropic",
+                "gemini",
+                "mistral",
+                "xai",
+                "qwen",
+                "cohere",
+                "upstage",
+            ],
+        )
+        self.assertEqual(config.policy.max_calls, 20)
 
     def test_file_config_explicitly_enables_xai(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -69,6 +213,101 @@ class ConfigurationTests(unittest.TestCase):
             self.assertEqual(
                 [provider.name for provider in config.providers],
                 ["openai", "anthropic", "gemini", "mistral", "xai"],
+            )
+
+    def test_file_config_explicitly_enables_qwen_and_cohere(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "config.toml"
+            path.write_text(
+                """
+[policy]
+max_calls = 20
+
+[providers.qwen]
+model = "qwen3.7-max"
+
+[providers.cohere]
+model = "command-a-plus-05-2026"
+""",
+                encoding="utf-8",
+            )
+
+            config = load_config(path)
+
+            self.assertEqual(
+                [provider.name for provider in config.providers],
+                [
+                    "openai",
+                    "anthropic",
+                    "gemini",
+                    "mistral",
+                    "qwen",
+                    "cohere",
+                ],
+            )
+            self.assertEqual(config.policy.max_calls, 20)
+            cohere = next(
+                provider
+                for provider in config.providers
+                if provider.name == "cohere"
+            )
+            self.assertEqual(cohere.extra["temperature"], 0)
+            self.assertEqual(
+                cohere.extra["thinking"],
+                {"token_budget": 800},
+            )
+
+    def test_file_config_can_override_default_cohere_temperature(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "config.toml"
+            path.write_text(
+                """
+[providers.cohere]
+model = "command-a-plus-05-2026"
+extra = { temperature = 0.3 }
+""",
+                encoding="utf-8",
+            )
+
+            config = load_config(path)
+
+            cohere = next(
+                provider
+                for provider in config.providers
+                if provider.name == "cohere"
+            )
+            self.assertEqual(cohere.extra["temperature"], 0.3)
+            self.assertEqual(
+                cohere.extra["thinking"],
+                {"token_budget": 800},
+            )
+
+    def test_file_config_can_enable_optional_upstage_provider(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "config.toml"
+            path.write_text(
+                """
+[policy]
+max_calls = 20
+
+[providers.upstage]
+enabled = true
+""",
+                encoding="utf-8",
+            )
+
+            config = load_config(path)
+
+            self.assertEqual(
+                [provider.name for provider in config.providers],
+                ["openai", "anthropic", "gemini", "mistral", "upstage"],
+            )
+            upstage = config.providers[-1]
+            self.assertEqual(upstage.model, "solar-pro3-260323")
+            self.assertEqual(upstage.secret_name, "UPSTAGE_API_KEY")
+            self.assertEqual(
+                upstage.extra["reasoning_effort"],
+                "low",
             )
 
     def test_rejects_non_allowlisted_endpoint(self) -> None:
@@ -92,6 +331,48 @@ endpoint = "https://attacker.example/v1/responses"
                 """
 [providers.xai]
 endpoint = "https://attacker.example/v1/responses"
+""",
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(ValueError, "not allowlisted"):
+                load_config(path)
+
+    def test_rejects_non_allowlisted_qwen_endpoint(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "config.toml"
+            path.write_text(
+                """
+[providers.qwen]
+endpoint = "https://attacker.example/v1/chat/completions"
+""",
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(ValueError, "not allowlisted"):
+                load_config(path)
+
+    def test_rejects_non_allowlisted_cohere_endpoint(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "config.toml"
+            path.write_text(
+                """
+[providers.cohere]
+endpoint = "https://attacker.example/v2/chat"
+""",
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(ValueError, "not allowlisted"):
+                load_config(path)
+
+    def test_rejects_non_allowlisted_upstage_endpoint(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "config.toml"
+            path.write_text(
+                """
+[providers.upstage]
+endpoint = "https://attacker.example/v1/chat/completions"
 """,
                 encoding="utf-8",
             )
@@ -127,6 +408,20 @@ max_output_tokens = 0
             with self.assertRaisesRegex(ValueError, "max_output_tokens"):
                 load_config(path)
 
+    def test_rejects_unknown_stage_limit(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "config.toml"
+            path.write_text(
+                """
+[providers.openai.stage_max_output_tokens]
+unknown = 100
+""",
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(ValueError, "unknown stages"):
+                load_config(path)
+
     def test_rejects_call_budget_below_complete_protocol(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "config.toml"
@@ -139,6 +434,31 @@ max_calls = 8
             )
 
             with self.assertRaisesRegex(ValueError, "Max calls"):
+                load_config(path)
+
+    def test_rejects_nonpositive_parallel_call_limit(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "config.toml"
+            path.write_text(
+                """
+[policy]
+max_parallel_calls = 0
+""",
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(ValueError, "max_parallel_calls"):
+                load_config(path)
+
+    def test_rejects_more_than_one_jury_repair_attempt(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "config.toml"
+            path.write_text(
+                "[policy]\njury_repair_attempts = 2\n",
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(ValueError, "jury_repair_attempts"):
                 load_config(path)
 
 

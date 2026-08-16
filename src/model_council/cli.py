@@ -22,12 +22,18 @@ from .providers.factory import create_provider
 from .run_lock import ServiceLock
 from .secrets import SecretResolver, default_secret_resolver
 from .store import CouncilStore, service_managed_data_dir
+from .version import PACKAGE_VERSION
 
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="council",
         description="Run an auditable council of heterogeneous language models.",
+    )
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=f"%(prog)s {PACKAGE_VERSION}",
     )
     parser.add_argument("--config", help="Path to a council TOML configuration")
     parser.add_argument(
@@ -66,7 +72,13 @@ def _parser() -> argparse.ArgumentParser:
     run.add_argument("--jury-quorum", type=int)
     run.add_argument("--min-lineages", type=int)
     run.add_argument("--max-calls", type=int)
+    run.add_argument("--max-parallel-calls", type=int)
     run.add_argument("--deadline-seconds", type=float)
+    run.add_argument("--max-question-chars", type=int)
+    run.add_argument("--max-stage-prompt-chars", type=int)
+    run.add_argument("--jury-repair-attempts", type=int)
+    run.add_argument("--truncation-retries", type=int)
+    run.add_argument("--max-recovery-output-tokens", type=int)
     run.add_argument("--idempotency-key")
     run.add_argument("--json", action="store_true")
 
@@ -124,7 +136,13 @@ def _select_run_config(
         "jury_quorum",
         "min_lineages",
         "max_calls",
+        "max_parallel_calls",
         "deadline_seconds",
+        "max_question_chars",
+        "max_stage_prompt_chars",
+        "jury_repair_attempts",
+        "truncation_retries",
+        "max_recovery_output_tokens",
     ):
         value = getattr(args, field, None)
         if value is not None:
@@ -296,6 +314,10 @@ def _print_result(result: dict[str, Any], *, as_json: bool) -> None:
         return
     print(f"Run: {result['run_id']}")
     print(f"Status: {result['status']}")
+    print(
+        f"Completion quality: "
+        f"{result.get('completion_quality', 'unknown')}"
+    )
     if result.get("answer"):
         print("\n" + result["answer"].strip())
     else:
@@ -304,6 +326,13 @@ def _print_result(result: dict[str, Any], *, as_json: bool) -> None:
         print("\nWarnings:")
         for warning in result["warnings"]:
             print(f"- {warning}")
+    if result.get("recoveries"):
+        print("\nRecoveries:")
+        for recovery in result["recoveries"]:
+            kind = recovery.get("kind") or recovery.get("stage", "unknown")
+            provider = recovery.get("provider", "unknown")
+            status = recovery.get("status", "unknown")
+            print(f"- {kind} / {provider}: {status}")
     if result.get("failures"):
         print("\nProvider failures:")
         for failure in result["failures"]:
@@ -316,6 +345,7 @@ def _print_result(result: dict[str, Any], *, as_json: bool) -> None:
 def _markdown_export(
     run: dict[str, Any],
     invocations: list[dict[str, Any]],
+    events: list[dict[str, Any]],
 ) -> str:
     result = run.get("result") or {}
     lines = [
@@ -323,6 +353,10 @@ def _markdown_export(
         "",
         f"- Run: `{run['id']}`",
         f"- Status: `{run['status']}`",
+        (
+            f"- Completion quality: "
+            f"`{result.get('completion_quality', 'unknown')}`"
+        ),
         f"- Protocol: `{run['protocol_id']}@{run['protocol_version']}`",
         f"- Protocol hash: `{run['protocol_hash']}`",
         "",
@@ -333,6 +367,16 @@ def _markdown_export(
         "## Council answer",
         "",
         result.get("answer") or "_No final synthesis was produced._",
+        "",
+        "## Candidate namespace",
+        "",
+        "```json",
+        json.dumps(
+            result.get("candidate_namespace"),
+            indent=2,
+            sort_keys=True,
+        ),
+        "```",
         "",
         "## Aggregate",
         "",
@@ -345,6 +389,22 @@ def _markdown_export(
     ]
     warnings = result.get("warnings") or []
     lines.extend([f"- {warning}" for warning in warnings] or ["- None"])
+    lines.extend(["", "## Recoveries", ""])
+    result_recoveries = result.get("recoveries") or []
+    if result_recoveries:
+        lines.extend(
+            [
+                "```json",
+                json.dumps(
+                    result_recoveries,
+                    indent=2,
+                    sort_keys=True,
+                ),
+                "```",
+            ]
+        )
+    else:
+        lines.append("_None._")
     lines.extend(["", "## Invocation record", ""])
     for invocation in invocations:
         lines.extend(
@@ -361,6 +421,29 @@ def _markdown_export(
                 "",
             ]
         )
+    recovery_events = [
+        event
+        for event in events
+        if event["event_type"]
+        in {
+            "truncated_response_preserved",
+            "truncation_recovery",
+            "jury_artifact_repair",
+            "incomplete_response_preserved",
+        }
+    ]
+    lines.extend(["## Recovery audit events", ""])
+    if recovery_events:
+        lines.extend(
+            [
+                "```json",
+                json.dumps(recovery_events, indent=2, sort_keys=True),
+                "```",
+                "",
+            ]
+        )
+    else:
+        lines.extend(["_None._", ""])
     lines.extend(
         [
             "## Limitations",
@@ -461,6 +544,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             payload = {
                 "run": run,
                 "invocations": store.list_invocations(args.run_id),
+                "events": store.list_events(args.run_id),
             }
             if args.json:
                 print(json.dumps(payload, indent=2, sort_keys=True))
@@ -493,16 +577,21 @@ def main(argv: Sequence[str] | None = None) -> int:
             if run is None:
                 raise KeyError(f"Unknown run: {args.run_id}")
             invocations = store.list_invocations(args.run_id)
+            events = store.list_events(args.run_id)
             output_path = Path(args.output).expanduser()
             output_path.parent.mkdir(parents=True, exist_ok=True)
             if args.format == "json":
                 content = json.dumps(
-                    {"run": run, "invocations": invocations},
+                    {
+                        "run": run,
+                        "invocations": invocations,
+                        "events": events,
+                    },
                     indent=2,
                     sort_keys=True,
                 )
             else:
-                content = _markdown_export(run, invocations)
+                content = _markdown_export(run, invocations, events)
             _write_private_text(output_path, content + "\n")
             print(output_path)
             return 0

@@ -35,6 +35,7 @@ from .service_store import (
     ServiceStore,
 )
 from .store import CouncilStore
+from .version import MOCK_SERVICE_PROFILE_VERSION
 
 
 DEFAULT_HOST = "127.0.0.1"
@@ -782,7 +783,7 @@ class CouncilHTTPServer(ThreadingHTTPServer):
 
 class CouncilRequestHandler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
-    server_version = "CouncilService/0.2.0a1"
+    server_version = f"CouncilService/{MOCK_SERVICE_PROFILE_VERSION}"
     sys_version = ""
 
     def setup(self) -> None:

@@ -24,9 +24,9 @@ assets, or other copyrightable contributions. They will be closed without
 review.
 
 The project will not accept external copyrightable contributions until a
-counsel-reviewed contributor license agreement grants the rights needed to
-maintain the AGPL public core and, if later chosen, offer separately negotiated
-commercial licenses. Opening issue discussion does not waive this gate.
+suitable contributor agreement grants the rights needed to maintain the AGPL
+public core and, if later chosen, offer separately negotiated commercial
+licenses. Opening issue discussion does not waive this gate.
 
 Repository-owner maintenance branches and pull requests are not external
 contributions, but they remain subject to project review and CI.

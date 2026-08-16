@@ -2,26 +2,31 @@
 
 ## Public-alpha posture
 
-CouncilLogic `0.2.0a1` adds a hardened, governed service alpha to the
-single-user local CLI. The service is mock-only, loopback-only, and must not be
-exposed as a public network daemon. It has application-level multi-principal
-controls, but it is not a production identity, billing, or Internet-facing
-system. Live service, Cloudflare or another remote front door, work use, and
-commercial use remain gated.
+CouncilLogic `0.3.0a1` retains the hardened, governed `0.2.0a1` mock-service
+profile alongside the single-user live CLI. The service is mock-only,
+loopback-only, and must not be exposed as a public network daemon. It has
+application-level multi-principal controls, but it is not a production
+identity, billing, or Internet-facing system. Live service, a remote front
+door, work use, and commercial service use remain gated.
 
-The five-provider CLI is a separate surface. Local tests and prior live checks
+These are application-level controls, not a compliance certification,
+enterprise security assessment, or substitute for provider and data-governance
+review.
+
+The seven-provider CLI is a separate surface. Local tests and prior live checks
 do not remove the alpha boundaries below, establish current provider health,
 or authorize service deployment.
 
 Before using sensitive material, decide whether sending that material to all
-five providers is permitted under the applicable contracts, account settings,
-data residency requirements, and law.
+configured providers is permitted under the applicable contracts, account
+settings, data residency requirements, and law.
 
 ## Assets and trust boundaries
 
 The principal assets are:
 
-- OpenAI, Anthropic, Gemini, Mistral, and xAI API credentials.
+- OpenAI, Anthropic, Gemini, Mistral, xAI, Alibaba Model Studio, and Cohere API
+  credentials, plus Upstage when its optional adapter is enabled.
 - Questions and contextual information supplied by the operator.
 - Provider prompts and raw responses.
 - Jury records, aggregate rankings, and synthesized answers.
@@ -49,7 +54,7 @@ The trust boundaries are:
 
 The `0.2.0a1` service accepts only loopback bind addresses and constructs four
 deterministic mock lineages. This frozen reference fixture does not mirror the
-five-provider live CLI.
+seven-provider live CLI.
 Startup rejects a store containing any live-mode run. This is a fail-closed
 separation from the live CLI, not permission to add a tunnel.
 
@@ -167,7 +172,17 @@ api.anthropic.com
 generativelanguage.googleapis.com
 api.mistral.ai
 api.x.ai
+dashscope-intl.aliyuncs.com
+dashscope-us.aliyuncs.com
+dashscope.aliyuncs.com
+cn-hongkong.dashscope.aliyuncs.com
+api.cohere.ai
+api.upstage.ai
 ```
+
+Qwen defaults to `dashscope-intl.aliyuncs.com`, Alibaba Model Studio's
+Singapore/International route. The remaining Alibaba hosts are allowed only
+for explicit regional overrides; keys and data-processing regions must match.
 
 Embedded URL credentials and non-allowlisted hosts are rejected. This reduces
 accidental key exfiltration through configuration. It is not certificate
@@ -185,20 +200,42 @@ The application itself writes the audit database and explicit exports. An
 external secret resolver can have its own effects and must be reviewed
 separately.
 
-### Constrained jury output
+### Constrained proposal and jury output
 
-Jury calls include a fixed, non-sensitive JSON Schema so providers can
-constrain the output before it reaches the local parser. No question, candidate
-text, personal data, or secret is placed in the schema itself. The application
-still validates the returned object and its candidate labels locally.
+Proposal and jury calls include fixed, non-sensitive JSON Schemas so providers
+can constrain output before it reaches the local parser. Proposal field sizes
+and list counts are bounded; synthesis receives those bounded artifacts and
+compact vote records rather than full jury prose. No question, candidate text,
+personal data, or secret is placed in a schema itself. The application still
+validates every returned object and jury candidate label locally. When a
+provider does not implement a portable length or item-count keyword, the
+adapter removes that keyword, preserves its bound in the field description,
+and still enforces the canonical bound after the response returns.
 Provider refusals and output-limit truncation can bypass schema guarantees and
-are treated as invalid judgments rather than trusted records.
+are treated as invalid artifacts rather than trusted records.
+
+Jury rationale instructions target 400 characters and local validation permits
+at most 1,000. When explicitly enabled by policy, one completed jury with a
+valid winner/ranking/confidence/abstention tuple may be sent back to the same
+provider for a decision-locked prose repair. The four decision fields must be
+exactly value-equal after local parsing; regenerated rationale,
+disagreement, and verification prose is not mechanically equivalent and
+requires audit. The original and repaired invocations are retained separately,
+and any repaired result is degraded. Missing or ambiguous decisions,
+multiple-object artifacts, and original responses above the bounded repair
+input size are not repairable. The same provider processes its
+original output a second time, so provider-side logging and retention apply to
+both requests.
 
 ### Diversity and blinded evaluation
 
-The default live configuration uses five separately named lineages. Candidate
+The default live configuration uses seven separately named lineages. Candidate
 provider names are replaced by shuffled labels for jury prompts, and aggregate
 input is anonymized for synthesis.
+
+Upstage is a known but disabled eighth lineage. Its adapter and destination
+restriction do not make it live-ready; enable it only after credential setup
+and a non-sensitive structured-output canary.
 
 This is metadata blinding, not anonymity. Models may infer authorship from
 style, content, capabilities, or shared training data. Providers are not
@@ -240,7 +277,7 @@ request metadata, and configured secret *names*. It is plaintext.
 Do not submit:
 
 - API keys, passwords, recovery codes, private keys, or session tokens.
-- Material whose disclosure to all five providers is prohibited.
+- Material whose disclosure to every configured provider is prohibited.
 - Personal or regulated data that has not passed the relevant review.
 - Unredacted production incidents when a minimum reproduction will do.
 
@@ -261,13 +298,38 @@ from quoted evidence, minimize supplied context, and verify important claims
 against primary sources outside the council. A confident consensus is not a
 security control.
 
+The jury-repair prompt treats the bounded original response and validation
+error as delimited untrusted data and repeats only a locally parsed immutable
+decision. This limits but does not eliminate prompt-injection risk: repaired
+free text may still be distorted, and the repair is visible to the same
+provider that produced the original artifact. Never place secrets in a jury
+response merely because a repair path is bounded.
+
 ## Availability and cost
 
 The application uses bounded retries for explicit retryable HTTP responses,
-timeouts, quorum rules, an application-level call budget, process locks, and
-resumable successful stages. Ambiguous transport outcomes are not
-automatically retried. These controls improve recovery and reduce duplicate
-billable calls but do not guarantee availability.
+timeouts, quorum rules, an application-level call budget, a per-stage parallel
+call cap, process locks, and resumable successful stages. Ambiguous transport
+outcomes are not automatically retried. These controls improve recovery and
+reduce duplicate billable calls but do not guarantee availability.
+
+Before provider work begins, deterministic character-count preflight rejects
+questions or projected downstream prompts beyond configured limits. A known,
+non-ambiguous output-length completion may be retried once with a larger
+bounded output allowance; its initial raw response is preserved first.
+When enabled, each eligible invalid jury may consume one additional
+application-level same-provider repair call. Repairs share `max_calls`, are
+prioritized in provider-configuration order, inherit jury token/timeout and
+lower-level transport-retry settings, and cannot consume the synthesis-reserved
+call. A dispatched repair is never logically replayed, repaired again, or
+given output-length recovery; an ambiguous outcome stays excluded.
+Ambiguous timeouts, connection failures, and crash-left-running calls remain
+non-retryable. Completed runs with any provider failure or recovery are marked
+`completion_quality=degraded`.
+
+Transport failure records contain a generated client request ID and sanitized
+numeric/taxonomy metadata (`elapsed_ms`, `transport_phase`, and
+`timeout_subtype`). Raw transport exception text is deliberately excluded.
 
 CLI `max_calls` and service call units count application-level logical provider
 invocations, not HTTP attempts made inside provider retry loops.

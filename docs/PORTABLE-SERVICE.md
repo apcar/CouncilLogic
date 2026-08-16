@@ -18,7 +18,8 @@ is authorized, no live provider key is accepted by this surface, and no work
 principal can be enabled. The single-user live CLI remains a separate surface.
 
 The service must not be switched from mock providers to OpenAI, Anthropic,
-Google, Mistral, or xAI until the later release gates in this document pass.
+Google, Mistral, xAI, Alibaba, Cohere, or Upstage until the later release gates
+in this document pass.
 
 ### Implementation snapshot
 
@@ -27,7 +28,7 @@ The service alpha now implements:
 - the frozen four-lineage `0.2.0a1` reference topology, represented by four
   deterministic mock slots behind a loopback-only asynchronous HTTP server
   with bounded workers and queue; this fixture does not mirror the separate
-  five-provider live CLI;
+  seven-provider live CLI;
 - the fixed six-principal catalog, with both work principals forced disabled;
 - per-principal bearer authentication with atomic verifier rotation and narrow
   operator revocation;
@@ -72,8 +73,8 @@ source.
 The governance wedge—the product differentiation—is the system around the
 inference pattern:
 
-- five genuinely different live-provider lineages, including Mistral and
-  xAI's Grok;
+- seven genuinely different live-provider lineages, including Mistral, xAI's
+  Grok, Alibaba's Qwen, and Cohere Command;
 - deterministic aggregation and a resumable, inspectable run record;
 - separately authenticated human and agent callers;
 - personal/work tenant separation;
@@ -132,7 +133,7 @@ durable Council run + deterministic mock providers
 Only the service process can construct provider adapters. In this alpha those
 adapters must be the four local deterministic mocks. A client holds one
 revocable Council credential, not an OpenAI, Anthropic, Gemini, Mistral, xAI,
-or Bitwarden credential.
+Alibaba, Cohere, Upstage, or Bitwarden credential.
 
 A later personal-access gate may put an authenticated HTTPS front door in
 front of the loopback origin. Loopback binding is not permission to expose the
@@ -330,7 +331,8 @@ database, queue, or observability plan.
 
 That does not mean the eventual service is free. Later gates may incur:
 
-- usage-based charges from the five live model providers;
+- usage-based charges from the seven default live model providers and any
+  optional provider an operator enables;
 - a secret-manager tier or additional machine identity;
 - an authenticated tunnel or identity plan;
 - backup storage and monitoring; and
@@ -388,7 +390,8 @@ Passing Gate 2 still does not authorize live model keys.
 - Prove that no client, log, request, database, package, or Git object contains
   an upstream credential.
 - Run a non-sensitive, tightly capped canary across OpenAI, Anthropic, Google,
-  Mistral, and xAI's Grok and reconcile Council records to provider billing.
+  Mistral, xAI's Grok, Alibaba's Qwen, and Cohere Command and reconcile Council
+  records to provider billing. Canary Upstage separately before adding it.
 - Rehearse revocation and rollback before removing any legacy secret.
 
 ### Gate 4 — personal agents

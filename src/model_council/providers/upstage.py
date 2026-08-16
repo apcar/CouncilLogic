@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import time
 from typing import Any
 
@@ -14,6 +15,31 @@ from model_council.protocol import structured_output_schema
 
 from .base import Provider
 from .http import JsonHttpClient, JsonResponse
+
+
+_REASONING_EFFORTS = frozenset({"minimal", "low", "medium", "high"})
+_UNSUPPORTED_STRUCTURED_OUTPUT_CONSTRAINTS = frozenset(
+    {
+        "maxItems",
+        "maxLength",
+        "minItems",
+        "minLength",
+    }
+)
+
+
+def _upstage_schema(value: Any) -> Any:
+    """Keep Upstage's constrained decoder on its documented schema subset."""
+
+    if isinstance(value, dict):
+        return {
+            key: _upstage_schema(item)
+            for key, item in value.items()
+            if key not in _UNSUPPORTED_STRUCTURED_OUTPUT_CONSTRAINTS
+        }
+    if isinstance(value, list):
+        return [_upstage_schema(item) for item in value]
+    return value
 
 
 def _integer(value: Any) -> int | None:
@@ -32,7 +58,53 @@ def _finish_reason(value: str | None) -> str | None:
     return value
 
 
-class MistralProvider(Provider):
+def _reasoning_effort(config: ProviderConfig) -> str:
+    value = config.extra.get("reasoning_effort", "low")
+    if not isinstance(value, str) or value not in _REASONING_EFFORTS:
+        raise ProviderError(
+            "Upstage configuration is invalid: extra.reasoning_effort must be "
+            "minimal, low, medium, or high",
+            category=ErrorCategory.INVALID_REQUEST,
+            retryable=False,
+        )
+    return value
+
+
+def _number_option(
+    config: ProviderConfig,
+    name: str,
+    *,
+    minimum: float,
+    maximum: float,
+) -> int | float | None:
+    if name not in config.extra:
+        return None
+    value = config.extra[name]
+    if (
+        not isinstance(value, (int, float))
+        or isinstance(value, bool)
+        or not math.isfinite(float(value))
+        or value < minimum
+        or value > maximum
+    ):
+        raise ProviderError(
+            f"Upstage configuration is invalid: extra.{name} must be a "
+            f"finite number between {minimum:g} and {maximum:g}",
+            category=ErrorCategory.INVALID_REQUEST,
+            retryable=False,
+        )
+    return value
+
+
+class UpstageProvider(Provider):
+    """Upstage's OpenAI-compatible Chat Completions API for Solar.
+
+    Solar Pro 3's documented structured-output subset does not include the
+    nullable union used by CouncilLogic's jury schema. Proposals therefore use
+    strict JSON Schema while juries use JSON-object mode and remain subject to
+    CouncilLogic's authoritative local parser and validation.
+    """
+
     def __init__(
         self,
         config: ProviderConfig,
@@ -53,6 +125,15 @@ class MistralProvider(Provider):
         timeout_seconds: float | None = None,
     ) -> ProviderResponse:
         output_schema = structured_output_schema(stage)
+        if stage == "jury" and "json" not in (
+            f"{system_prompt}\n{user_prompt}".casefold()
+        ):
+            # Upstage requires an explicit JSON instruction in JSON-object mode.
+            system_prompt = (
+                f"{system_prompt.rstrip()}\n\n"
+                "Return the required object as valid JSON."
+            )
+
         payload: dict[str, Any] = {
             "model": self.config.model,
             "messages": [
@@ -65,22 +146,36 @@ class MistralProvider(Provider):
                 else self.config.output_tokens_for(stage)
             ),
             "stream": False,
-            "reasoning_effort": str(
-                self.config.extra.get("reasoning_effort", "none")
-            ),
+            # Medium and high reserve at least 4,096 and 8,192 reasoning tokens,
+            # respectively. Low is the reliable bounded-workload default.
+            "reasoning_effort": _reasoning_effort(self.config),
         }
-        if output_schema is not None:
+        if stage == "proposal" and output_schema is not None:
             payload["response_format"] = {
                 "type": "json_schema",
                 "json_schema": {
-                    "name": f"model_council_{stage}",
+                    "name": "model_council_proposal",
                     "strict": True,
-                    "schema": output_schema,
+                    "schema": _upstage_schema(output_schema),
                 },
             }
-        for option in ("temperature", "random_seed"):
-            if option in self.config.extra:
-                payload[option] = self.config.extra[option]
+        elif stage == "jury":
+            payload["response_format"] = {"type": "json_object"}
+
+        for option, minimum, maximum in (
+            ("temperature", 0.0, 2.0),
+            ("top_p", 0.0, 1.0),
+            ("frequency_penalty", -2.0, 2.0),
+            ("presence_penalty", -2.0, 2.0),
+        ):
+            value = _number_option(
+                self.config,
+                option,
+                minimum=minimum,
+                maximum=maximum,
+            )
+            if value is not None:
+                payload[option] = value
 
         started = time.monotonic()
         result = self._client.post_json(
@@ -118,6 +213,7 @@ class MistralProvider(Provider):
         )
         message = choice.get("message") if choice else None
         message = message if isinstance(message, dict) else {}
+
         content_raw = message.get("content")
         text_parts: list[str] = []
         if isinstance(content_raw, str):
@@ -133,14 +229,14 @@ class MistralProvider(Provider):
         raw_finish_reason = choice.get("finish_reason") if choice else None
         if not isinstance(raw_finish_reason, str):
             raw_finish_reason = None
-        normalized_finish_reason = _finish_reason(raw_finish_reason)
-        if normalized_finish_reason not in {"stop", "length"}:
+        finish_reason = _finish_reason(raw_finish_reason)
+        if finish_reason not in {"stop", "length"}:
             raise ProviderError(
-                "Mistral response did not complete normally"
+                "Upstage response did not complete normally"
                 f" (finish_reason={raw_finish_reason or 'missing'})",
                 category=(
                     ErrorCategory.CONTENT_FILTER
-                    if normalized_finish_reason == "content_filter"
+                    if finish_reason == "content_filter"
                     else ErrorCategory.INVALID_RESPONSE
                 ),
                 retryable=False,
@@ -149,14 +245,10 @@ class MistralProvider(Provider):
                 attempts=result.attempts,
                 ambiguous=False,
             )
-        if not content and normalized_finish_reason != "length":
+        if not content and finish_reason != "length":
             raise ProviderError(
-                "Mistral response did not contain generated text",
-                category=(
-                    ErrorCategory.CONTENT_FILTER
-                    if raw_finish_reason in {"content_filter", "refusal"}
-                    else ErrorCategory.INVALID_RESPONSE
-                ),
+                "Upstage response did not contain generated text",
+                category=ErrorCategory.INVALID_RESPONSE,
                 retryable=False,
                 status_code=result.status_code,
                 request_id=result.request_id,
@@ -196,7 +288,7 @@ class MistralProvider(Provider):
             usage=usage,
             latency_ms=latency_ms,
             attempts=result.attempts,
-            finish_reason=normalized_finish_reason,
+            finish_reason=finish_reason,
             metadata={
                 "stage": stage,
                 "client_request_id": result.client_request_id,

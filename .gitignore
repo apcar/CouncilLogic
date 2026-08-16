@@ -9,13 +9,19 @@ token
 tokens/
 secrets.*
 !src/model_council/secrets.py
+credentials.*
+*.key
+*.pem
+*.p12
 
 # Private and generated working data
 work/
 private/
 private-data/
 private-exports/
+outputs/
 data/
+*.log
 *.db
 *.db-shm
 *.db-wal

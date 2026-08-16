@@ -10,10 +10,29 @@ from model_council.models import (
     ProviderResponse,
     Usage,
 )
-from model_council.protocol import jury_json_schema
+from model_council.protocol import structured_output_schema
 
 from .base import Provider
 from .http import JsonHttpClient, JsonResponse
+
+
+_UNSUPPORTED_STRUCTURED_OUTPUT_CONSTRAINTS = frozenset(
+    {"minLength", "maxLength", "maxItems"}
+)
+
+
+def _anthropic_schema(value: Any) -> Any:
+    """Remove bounds Anthropic rejects while preserving local validation."""
+
+    if isinstance(value, dict):
+        return {
+            key: _anthropic_schema(item)
+            for key, item in value.items()
+            if key not in _UNSUPPORTED_STRUCTURED_OUTPUT_CONSTRAINTS
+        }
+    if isinstance(value, list):
+        return [_anthropic_schema(item) for item in value]
+    return value
 
 
 def _integer(value: Any) -> int | None:
@@ -49,18 +68,25 @@ class AnthropicProvider(Provider):
         system_prompt: str,
         user_prompt: str,
         stage: str,
+        max_output_tokens: int | None = None,
+        timeout_seconds: float | None = None,
     ) -> ProviderResponse:
+        output_schema = structured_output_schema(stage)
         payload: dict[str, Any] = {
             "model": self.config.model,
-            "max_tokens": self.config.max_output_tokens,
+            "max_tokens": (
+                max_output_tokens
+                if max_output_tokens is not None
+                else self.config.output_tokens_for(stage)
+            ),
             "system": system_prompt,
             "messages": [{"role": "user", "content": user_prompt}],
         }
-        if stage == "jury":
+        if output_schema is not None:
             payload["output_config"] = {
                 "format": {
                     "type": "json_schema",
-                    "schema": jury_json_schema(),
+                    "schema": _anthropic_schema(output_schema),
                 }
             }
         if "temperature" in self.config.extra:
@@ -81,7 +107,11 @@ class AnthropicProvider(Provider):
             url=self.config.endpoint,
             headers=headers,
             payload=payload,
-            timeout_seconds=self.config.timeout_seconds,
+            timeout_seconds=(
+                timeout_seconds
+                if timeout_seconds is not None
+                else self.config.timeout_for(stage)
+            ),
             max_attempts=self.config.max_attempts,
         )
         return self._parse(
@@ -109,11 +139,14 @@ class AnthropicProvider(Provider):
                 ):
                     text_parts.append(block["text"])
         content = "".join(text_parts).strip()
-        if not content:
-            stop_reason = data.get("stop_reason")
+        raw_finish_reason = data.get("stop_reason")
+        if not isinstance(raw_finish_reason, str):
+            raw_finish_reason = None
+        finish_reason = _finish_reason(raw_finish_reason)
+        if not content and finish_reason != "length":
             category = (
                 ErrorCategory.CONTENT_FILTER
-                if stop_reason in {"refusal", "content_filter"}
+                if raw_finish_reason in {"refusal", "content_filter"}
                 else ErrorCategory.INVALID_RESPONSE
             )
             raise ProviderError(
@@ -149,11 +182,6 @@ class AnthropicProvider(Provider):
         request_id = result.request_id
         if request_id is None and isinstance(data.get("id"), str):
             request_id = data["id"]
-        raw_finish_reason = data.get("stop_reason")
-        if not isinstance(raw_finish_reason, str):
-            raw_finish_reason = None
-        finish_reason = _finish_reason(raw_finish_reason)
-
         return ProviderResponse(
             content=content,
             resolved_model=resolved_model,

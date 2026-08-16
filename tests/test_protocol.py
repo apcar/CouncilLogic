@@ -15,7 +15,10 @@ from model_council.protocol import (  # noqa: E402
     aggregate_juries,
     jury_json_schema,
     jury_prompts,
+    jury_repair_prompts,
     parse_jury,
+    parse_proposal,
+    proposal_json_schema,
     proposal_prompts,
     protocol_hash,
     synthesis_prompts,
@@ -39,6 +42,68 @@ def judgment(
         "material_disagreements": disagreements or [],
         "verification_needed": verification or [],
     }
+
+
+def proposal() -> dict[str, object]:
+    return {
+        "outcome": "Use the bounded workload runner.",
+        "evidence_and_reasoning": ["It limits downstream prompt growth."],
+        "uncertainty": ["Live-provider variance remains."],
+        "verification_needed": ["Run a private soak test."],
+    }
+
+
+class ProposalParsingTests(unittest.TestCase):
+    def test_parses_valid_bounded_proposal(self) -> None:
+        value = proposal()
+
+        parsed = parse_proposal(json.dumps(value))
+
+        self.assertEqual(parsed, value)
+
+    def test_accepts_four_evidence_items_and_rejects_five(self) -> None:
+        boundary = proposal()
+        boundary["evidence_and_reasoning"] = [
+            f"Material reason {index}." for index in range(4)
+        ]
+
+        parsed = parse_proposal(json.dumps(boundary))
+
+        self.assertEqual(len(parsed["evidence_and_reasoning"]), 4)
+        boundary["evidence_and_reasoning"].append(
+            "A fifth material reason."
+        )
+        with self.assertRaisesRegex(
+            ValueError,
+            "evidence_and_reasoning must contain at most 4 items",
+        ):
+            parse_proposal(json.dumps(boundary))
+
+    def test_rejects_oversized_or_extra_proposal_fields(self) -> None:
+        oversized = proposal()
+        oversized["outcome"] = "x" * 601
+        extra = proposal()
+        extra["provider"] = "untrusted"
+
+        with self.assertRaisesRegex(ValueError, "at most 600"):
+            parse_proposal(json.dumps(oversized))
+        with self.assertRaisesRegex(ValueError, "unexpected keys"):
+            parse_proposal(json.dumps(extra))
+
+    def test_rejects_serialized_overflow_and_unpaired_surrogate(self) -> None:
+        escaped = proposal()
+        escaped["outcome"] = '"' * 400
+        surrogate = proposal()
+        surrogate["outcome"] = "\ud800"
+
+        with self.assertRaisesRegex(
+            ValueError, "serialized JSON characters"
+        ):
+            parse_proposal(json.dumps(escaped))
+        with self.assertRaisesRegex(
+            ValueError, "unpaired Unicode surrogates"
+        ):
+            parse_proposal(json.dumps(surrogate))
 
 
 class JuryParsingTests(unittest.TestCase):
@@ -91,6 +156,61 @@ class JuryParsingTests(unittest.TestCase):
             parse_jury(json.dumps(inconsistent), ["A", "B"])
         with self.assertRaisesRegex(ValueError, "unexpected keys"):
             parse_jury(json.dumps(extra), ["A", "B"])
+
+    def test_rejects_serialized_jury_string_overflow(self) -> None:
+        escaped = judgment("A", ["A", "B"])
+        escaped["material_disagreements"] = ["\x00" * 100]
+
+        with self.assertRaisesRegex(
+            ValueError, "serialized JSON characters"
+        ):
+            parse_jury(json.dumps(escaped), ["A", "B"])
+
+    def test_jury_rationale_accepts_1000_and_rejects_1001_characters(
+        self,
+    ) -> None:
+        boundary = judgment("A", ["A", "B"])
+        boundary["rationale"] = "x" * 1_000
+        oversized = dict(boundary)
+        oversized["rationale"] = "x" * 1_001
+
+        self.assertEqual(
+            len(parse_jury(json.dumps(boundary), ["A", "B"])["rationale"]),
+            1_000,
+        )
+        with self.assertRaisesRegex(ValueError, "at most 1000"):
+            parse_jury(json.dumps(oversized), ["A", "B"])
+
+    def test_jury_repair_prompt_locks_the_existing_decision(self) -> None:
+        oversized = judgment("B", ["B", "A"])
+        oversized["rationale"] = "x" * 1_001
+
+        system, user, decision = jury_repair_prompts(
+            json.dumps(oversized),
+            "rationale must be at most 1000 characters",
+            ["A", "B"],
+        )
+
+        self.assertEqual(
+            decision,
+            {
+                "winner": "B",
+                "ranking": ["B", "A"],
+                "confidence": "medium",
+                "abstain": False,
+            },
+        )
+        self.assertIn("not a new evaluation", system)
+        self.assertIn("must remain exactly as provided", system)
+        self.assertIn("Hard limits are 1000 characters", system)
+        self.assertIn("BEGIN_UNTRUSTED_JURY_REPAIR_JSON", user)
+        self.assertIn('"winner": "B"', user)
+        with self.assertRaisesRegex(ValueError, "at most 6000"):
+            jury_repair_prompts(
+                "x" * 6_001,
+                "validation error",
+                ["A", "B"],
+            )
 
 
 class AggregationTests(unittest.TestCase):
@@ -158,6 +278,62 @@ class AggregationTests(unittest.TestCase):
 
 
 class PromptAndIdentityTests(unittest.TestCase):
+    def test_proposal_schema_requires_every_protocol_field(self) -> None:
+        schema = proposal_json_schema()
+
+        self.assertEqual(
+            set(schema["required"]),
+            {
+                "outcome",
+                "evidence_and_reasoning",
+                "uncertainty",
+                "verification_needed",
+            },
+        )
+        self.assertEqual(
+            schema["properties"]["outcome"]["maxLength"],
+            600,
+        )
+        self.assertIn(
+            "600 characters",
+            schema["properties"]["outcome"]["description"],
+        )
+        self.assertIn(
+            "Must contain at most 4 items",
+            schema["properties"]["evidence_and_reasoning"][
+                "description"
+            ],
+        )
+        self.assertIn(
+            "350 characters",
+            schema["properties"]["evidence_and_reasoning"]["items"][
+                "description"
+            ],
+        )
+        self.assertIn(
+            "Must contain at most 3 items",
+            schema["properties"]["uncertainty"]["description"],
+        )
+        self.assertIn(
+            "280 characters",
+            schema["properties"]["uncertainty"]["items"][
+                "description"
+            ],
+        )
+        self.assertIn(
+            "Must contain at most 4 items",
+            schema["properties"]["verification_needed"][
+                "description"
+            ],
+        )
+        self.assertIn(
+            "280 characters",
+            schema["properties"]["verification_needed"]["items"][
+                "description"
+            ],
+        )
+        self.assertFalse(schema["additionalProperties"])
+
     def test_jury_schema_requires_every_protocol_field(self) -> None:
         schema = jury_json_schema()
 
@@ -170,6 +346,38 @@ class PromptAndIdentityTests(unittest.TestCase):
             "material_disagreements",
             "verification_needed",
         })
+        self.assertIn(
+            "1000 characters",
+            schema["properties"]["rationale"]["description"],
+        )
+        self.assertEqual(
+            schema["properties"]["rationale"]["maxLength"],
+            1_000,
+        )
+        self.assertIn(
+            "Must contain at most 4 items",
+            schema["properties"]["material_disagreements"][
+                "description"
+            ],
+        )
+        self.assertIn(
+            "280 characters",
+            schema["properties"]["material_disagreements"]["items"][
+                "description"
+            ],
+        )
+        self.assertIn(
+            "Must contain at most 4 items",
+            schema["properties"]["verification_needed"][
+                "description"
+            ],
+        )
+        self.assertIn(
+            "280 characters",
+            schema["properties"]["verification_needed"]["items"][
+                "description"
+            ],
+        )
         self.assertFalse(schema["additionalProperties"])
 
     def test_prompts_preserve_protocol_boundaries(self) -> None:
@@ -184,21 +392,53 @@ class PromptAndIdentityTests(unittest.TestCase):
             [judgment("A", ["A", "B"])],
         )
 
-        self.assertIn("## Outcome", proposal_system)
+        self.assertIn('"evidence_and_reasoning"', proposal_system)
+        self.assertIn("valid finished object", proposal_system)
+        self.assertIn(
+            "Target at most three evidence_and_reasoning and\n"
+            "verification_needed items and at most two uncertainty items",
+            proposal_system,
+        )
+        self.assertIn(
+            "A numbered request\n"
+            "or a requested number of deliverables",
+            proposal_system,
+        )
+        self.assertIn(
+            "does not change these\n"
+            "array limits or require one array item per requested deliverable",
+            proposal_system,
+        )
+        self.assertIn("merge or remove lower-priority", proposal_system)
+        self.assertIn(
+            "absolute maxima are four evidence_and_reasoning items, three\n"
+            "uncertainty items, and four verification_needed items",
+            proposal_system,
+        )
         self.assertIn("untrusted question data", proposal_user)
         self.assertIn("metadata-blind", jury_system)
         self.assertIn('"winner"', jury_system)
+        self.assertIn(
+            "no more than 400 characters in rationale",
+            jury_system,
+        )
+        self.assertIn("two items per array", jury_system)
+        self.assertIn("140 characters per array item", jury_system)
+        self.assertIn("rewrite it shorter before returning", jury_system)
+        self.assertIn("Hard schema limits are at most 1000", jury_system)
         self.assertIn('"B": "Second"', jury_user)
         self.assertIn("not a new juror", synthesis_system)
         self.assertIn("## Dissent", synthesis_system)
         self.assertIn('"aggregate"', synthesis_user)
+        self.assertIn('"jury_votes"', synthesis_user)
+        self.assertNotIn('"rationale"', synthesis_user)
 
     def test_protocol_identity_and_stable_hash(self) -> None:
         self.assertEqual(PROTOCOL_ID, "independent-jury")
-        self.assertEqual(PROTOCOL_VERSION, "1.0.0-beta")
+        self.assertEqual(PROTOCOL_VERSION, "1.2.1-beta")
         self.assertEqual(
             protocol_hash(),
-            "9d7cf6ef8f444e849ca26c5bb1a84f3d5b6382883370297fb7318d07fc00176d",
+            "3c9b50e41bc1aa8fa1bea769c98ee4d6908b63f586c78d95b9097e0604503ee6",
         )
 
 

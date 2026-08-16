@@ -8,6 +8,7 @@ import socket
 import sys
 import threading
 import unittest
+from urllib.error import URLError
 from urllib.request import Request
 
 
@@ -20,6 +21,7 @@ from model_council.models import (  # noqa: E402
     ProviderError,
 )
 from model_council.providers.anthropic import AnthropicProvider  # noqa: E402
+from model_council.providers.cohere import CohereProvider  # noqa: E402
 from model_council.providers.factory import create_provider  # noqa: E402
 from model_council.providers.gemini import GeminiProvider  # noqa: E402
 from model_council.providers.http import (  # noqa: E402
@@ -30,10 +32,21 @@ from model_council.providers.http import (  # noqa: E402
 from model_council.providers.mistral import MistralProvider  # noqa: E402
 from model_council.providers.mock import MockProvider  # noqa: E402
 from model_council.providers.openai import OpenAIProvider  # noqa: E402
+from model_council.providers.qwen import QwenProvider  # noqa: E402
+from model_council.providers.upstage import UpstageProvider  # noqa: E402
 from model_council.providers.xai import XAIProvider  # noqa: E402
+from model_council.protocol import structured_output_schema  # noqa: E402
 
 
-def config(name: str, endpoint: str, model: str = "test-model") -> ProviderConfig:
+def config(
+    name: str,
+    endpoint: str,
+    model: str = "test-model",
+    *,
+    extra: dict[str, object] | None = None,
+    stage_max_output_tokens: dict[str, int] | None = None,
+    stage_timeout_seconds: dict[str, float] | None = None,
+) -> ProviderConfig:
     return ProviderConfig(
         name=name,
         model=model,
@@ -42,6 +55,9 @@ def config(name: str, endpoint: str, model: str = "test-model") -> ProviderConfi
         endpoint=endpoint,
         timeout_seconds=3,
         max_attempts=3,
+        extra=extra or {},
+        stage_max_output_tokens=stage_max_output_tokens or {},
+        stage_timeout_seconds=stage_timeout_seconds or {},
     )
 
 
@@ -49,9 +65,11 @@ class SequenceTransport:
     def __init__(self, *items: HttpResponse | BaseException) -> None:
         self.items = list(items)
         self.requests: list[Request] = []
+        self.timeouts: list[float] = []
 
     def __call__(self, request: Request, timeout: float) -> HttpResponse:
         self.requests.append(request)
+        self.timeouts.append(timeout)
         item = self.items.pop(0)
         if isinstance(item, BaseException):
             raise item
@@ -98,7 +116,110 @@ def client(
     )
 
 
+def schema_keys(value: object) -> set[str]:
+    keys: set[str] = set()
+    if isinstance(value, dict):
+        keys.update(str(key) for key in value)
+        for item in value.values():
+            keys.update(schema_keys(item))
+    elif isinstance(value, list):
+        for item in value:
+            keys.update(schema_keys(item))
+    return keys
+
+
 class ParsingTests(unittest.TestCase):
+    def test_explicit_empty_length_responses_remain_recoverable(self) -> None:
+        cases = (
+            (
+                OpenAIProvider,
+                config(
+                    "openai",
+                    "https://api.openai.com/v1/responses",
+                ),
+                {
+                    "id": "openai-length",
+                    "model": "test-model",
+                    "status": "incomplete",
+                    "incomplete_details": {
+                        "reason": "max_output_tokens",
+                    },
+                    "output": [],
+                },
+            ),
+            (
+                AnthropicProvider,
+                config(
+                    "anthropic",
+                    "https://api.anthropic.com/v1/messages",
+                ),
+                {
+                    "id": "anthropic-length",
+                    "model": "test-model",
+                    "stop_reason": "max_tokens",
+                    "content": [],
+                },
+            ),
+            (
+                GeminiProvider,
+                config(
+                    "gemini",
+                    (
+                        "https://generativelanguage.googleapis.com/"
+                        "v1beta/models/{model}:generateContent"
+                    ),
+                ),
+                {
+                    "responseId": "gemini-length",
+                    "modelVersion": "test-model",
+                    "candidates": [
+                        {
+                            "content": {"parts": []},
+                            "finishReason": "MAX_TOKENS",
+                        }
+                    ],
+                },
+            ),
+            (
+                MistralProvider,
+                config(
+                    "mistral",
+                    "https://api.mistral.ai/v1/chat/completions",
+                ),
+                {
+                    "id": "mistral-length",
+                    "model": "test-model",
+                    "choices": [
+                        {
+                            "message": {
+                                "role": "assistant",
+                                "content": "",
+                            },
+                            "finish_reason": "length",
+                        }
+                    ],
+                },
+            ),
+        )
+
+        for provider_type, provider_config, payload in cases:
+            with self.subTest(provider=provider_config.name):
+                transport = SequenceTransport(response(200, payload))
+                provider = provider_type(
+                    provider_config,
+                    "provider-secret",
+                    client=client(transport),
+                )
+
+                parsed = provider.generate(
+                    system_prompt="system",
+                    user_prompt="question",
+                    stage="proposal",
+                )
+
+                self.assertEqual(parsed.content, "")
+                self.assertEqual(parsed.finish_reason, "length")
+
     def test_openai_responses_api_payload_and_parsing(self) -> None:
         transport = SequenceTransport(
             response(
@@ -269,6 +390,110 @@ class ParsingTests(unittest.TestCase):
             body["output_config"]["format"]["schema"]["required"],
         )
 
+    def test_anthropic_strips_only_unsupported_schema_constraints(
+        self,
+    ) -> None:
+        transport = SequenceTransport(
+            *[
+                response(
+                    200,
+                    {
+                        "id": f"msg_{stage}",
+                        "model": "claude-test",
+                        "content": [{"type": "text", "text": "{}"}],
+                        "stop_reason": "end_turn",
+                    },
+                )
+                for stage in ("proposal", "jury")
+            ]
+        )
+        provider = AnthropicProvider(
+            config("anthropic", "https://api.anthropic.com/v1/messages"),
+            "anthropic-secret",
+            client=client(transport),
+        )
+
+        for stage in ("proposal", "jury"):
+            provider.generate(
+                system_prompt="system",
+                user_prompt="question",
+                stage=stage,
+            )
+
+        for stage, request in zip(
+            ("proposal", "jury"), transport.requests, strict=True
+        ):
+            body = json.loads(request.data or b"{}")
+            schema = body["output_config"]["format"]["schema"]
+            self.assertTrue(
+                {"type", "properties", "required", "additionalProperties"}
+                <= set(schema)
+            )
+            self.assertTrue(
+                {"minLength", "maxLength", "maxItems"}
+                .isdisjoint(schema_keys(schema))
+            )
+            if stage == "proposal":
+                properties = schema["properties"]
+                self.assertIn(
+                    "600 characters",
+                    properties["outcome"]["description"],
+                )
+                self.assertIn(
+                    "Must contain at most 4 items",
+                    properties["evidence_and_reasoning"][
+                        "description"
+                    ],
+                )
+                self.assertIn(
+                    "350 characters",
+                    properties["evidence_and_reasoning"]["items"][
+                        "description"
+                    ],
+                )
+                self.assertIn(
+                    "Must contain at most 3 items",
+                    properties["uncertainty"]["description"],
+                )
+                self.assertIn(
+                    "280 characters",
+                    properties["uncertainty"]["items"]["description"],
+                )
+                self.assertIn(
+                    "Must contain at most 4 items",
+                    properties["verification_needed"]["description"],
+                )
+                self.assertIn(
+                    "280 characters",
+                    properties["verification_needed"]["items"][
+                        "description"
+                    ],
+                )
+            else:
+                properties = schema["properties"]
+                self.assertIn(
+                    "1000 characters",
+                    properties["rationale"]["description"],
+                )
+                for field_name in (
+                    "material_disagreements",
+                    "verification_needed",
+                ):
+                    self.assertIn(
+                        "Must contain at most 4 items",
+                        properties[field_name]["description"],
+                    )
+                    self.assertIn(
+                        "280 characters",
+                        properties[field_name]["items"]["description"],
+                    )
+            canonical = structured_output_schema(stage)
+            self.assertIsNotNone(canonical)
+            self.assertTrue(
+                {"minLength", "maxLength", "maxItems"}
+                & schema_keys(canonical)
+            )
+
     def test_gemini_generate_content_parsing(self) -> None:
         transport = SequenceTransport(
             response(
@@ -302,6 +527,7 @@ class ParsingTests(unittest.TestCase):
                     "https://generativelanguage.googleapis.com/"
                     "v1beta/models/{model}:generateContent"
                 ),
+                extra={"thinking_level": "low"},
             ),
             "gemini-secret",
             client=client(transport),
@@ -328,6 +554,10 @@ class ParsingTests(unittest.TestCase):
         )
         self.assertIn(
             "abstain", response_format["text"]["schema"]["required"]
+        )
+        self.assertEqual(
+            body["generationConfig"]["thinkingConfig"],
+            {"thinkingLevel": "low"},
         )
 
     def test_mistral_chat_payload_and_parsing(self) -> None:
@@ -388,8 +618,10 @@ class ParsingTests(unittest.TestCase):
         self.assertTrue(schema["strict"])
         self.assertFalse(schema["schema"]["additionalProperties"])
 
-    def test_mistral_rejects_non_success_finish_reasons(self) -> None:
-        for finish_reason in ("length", "model_length", "error", "tool_calls"):
+    def test_mistral_preserves_known_length_completions_for_recovery(
+        self,
+    ) -> None:
+        for finish_reason in ("length", "model_length"):
             with self.subTest(finish_reason=finish_reason):
                 transport = SequenceTransport(
                     response(
@@ -420,6 +652,47 @@ class ParsingTests(unittest.TestCase):
                     client=client(transport),
                 )
 
+                parsed = provider.generate(
+                    system_prompt="system",
+                    user_prompt="question",
+                    stage="synthesis",
+                )
+
+                self.assertEqual(parsed.content, "partial output")
+                self.assertEqual(parsed.finish_reason, "length")
+                self.assertEqual(parsed.request_id, "req_incomplete")
+
+    def test_mistral_rejects_other_non_success_finish_reasons(self) -> None:
+        for finish_reason in ("error", "tool_calls"):
+            with self.subTest(finish_reason=finish_reason):
+                transport = SequenceTransport(
+                    response(
+                        200,
+                        {
+                            "id": "chatcmpl_incomplete",
+                            "model": "mistral-medium-3-5",
+                            "choices": [
+                                {
+                                    "message": {
+                                        "role": "assistant",
+                                        "content": "partial output",
+                                    },
+                                    "finish_reason": finish_reason,
+                                }
+                            ],
+                        },
+                        {"mistral-correlation-id": "req_incomplete"},
+                    )
+                )
+                provider = MistralProvider(
+                    config(
+                        "mistral",
+                        "https://api.mistral.ai/v1/chat/completions",
+                    ),
+                    "mistral-secret",
+                    client=client(transport),
+                )
+
                 with self.assertRaises(ProviderError) as caught:
                     provider.generate(
                         system_prompt="system",
@@ -432,10 +705,67 @@ class ParsingTests(unittest.TestCase):
                     ErrorCategory.INVALID_RESPONSE,
                 )
                 self.assertFalse(caught.exception.ambiguous)
-                self.assertEqual(
-                    caught.exception.request_id,
-                    "req_incomplete",
-                )
+
+    def test_stage_limits_and_call_overrides_reach_provider_payload(
+        self,
+    ) -> None:
+        transport = SequenceTransport(
+            response(
+                200,
+                {
+                    "id": "resp_limits",
+                    "model": "gpt-test",
+                    "status": "completed",
+                    "output_text": "Answer",
+                },
+            ),
+            response(
+                200,
+                {
+                    "id": "resp_override",
+                    "model": "gpt-test",
+                    "status": "completed",
+                    "output_text": "Answer",
+                },
+            ),
+        )
+        provider = OpenAIProvider(
+            config(
+                "openai",
+                "https://api.openai.com/v1/responses",
+                stage_max_output_tokens={"proposal": 3210},
+                stage_timeout_seconds={"proposal": 45.0},
+            ),
+            "openai-secret",
+            client=client(transport),
+        )
+
+        provider.generate(
+            system_prompt="system",
+            user_prompt="question",
+            stage="proposal",
+        )
+        provider.generate(
+            system_prompt="system",
+            user_prompt="question",
+            stage="proposal",
+            max_output_tokens=6543,
+            timeout_seconds=67.0,
+        )
+
+        first = json.loads(transport.requests[0].data or b"{}")
+        second = json.loads(transport.requests[1].data or b"{}")
+        self.assertEqual(first["max_output_tokens"], 3210)
+        self.assertEqual(second["max_output_tokens"], 6543)
+        self.assertEqual(transport.timeouts, [45.0, 67.0])
+        self.assertEqual(
+            first["text"]["format"]["name"],
+            "model_council_proposal",
+        )
+        self.assertIn(
+            "evidence_and_reasoning",
+            first["text"]["format"]["schema"]["required"],
+        )
 
 
 class RetryAndErrorTests(unittest.TestCase):
@@ -501,8 +831,13 @@ class RetryAndErrorTests(unittest.TestCase):
             socket.timeout(),
             response(200, {"would": "duplicate"}),
         )
+        ticks = iter((10.0, 12.345))
         with self.assertRaises(ProviderError) as caught:
-            client(transport).post_json(
+            JsonHttpClient(
+                transport=transport,
+                sleep=lambda _: None,
+                monotonic=lambda: next(ticks),
+            ).post_json(
                 url="https://api.example.test/generate",
                 headers={},
                 payload={},
@@ -513,6 +848,75 @@ class RetryAndErrorTests(unittest.TestCase):
         self.assertEqual(caught.exception.category, ErrorCategory.TIMEOUT)
         self.assertTrue(caught.exception.ambiguous)
         self.assertEqual(len(transport.requests), 1)
+        request_headers = {
+            key.casefold(): value
+            for key, value in transport.requests[0].header_items()
+        }
+        telemetry = caught.exception.to_dict()
+        self.assertEqual(
+            telemetry["client_request_id"],
+            request_headers["x-client-request-id"],
+        )
+        self.assertEqual(telemetry["elapsed_ms"], 2345)
+        self.assertEqual(
+            telemetry["transport_phase"],
+            "request_in_flight",
+        )
+        self.assertEqual(
+            telemetry["timeout_subtype"],
+            "socket_or_os_timeout",
+        )
+
+    def test_transport_error_metadata_survives_attempt_wrapping(self) -> None:
+        transport = SequenceTransport(
+            ProviderError(
+                "bounded transport fixture",
+                category=ErrorCategory.TIMEOUT,
+                retryable=True,
+                ambiguous=True,
+                client_request_id="original-client-id",
+                elapsed_ms=321,
+                transport_phase="response_read",
+                timeout_subtype="fixture_timeout",
+            )
+        )
+
+        with self.assertRaises(ProviderError) as caught:
+            client(transport).post_json(
+                url="https://api.example.test/generate",
+                headers={},
+                payload={},
+                timeout_seconds=2,
+                max_attempts=3,
+            )
+
+        error = caught.exception
+        self.assertEqual(error.attempts, 1)
+        self.assertEqual(error.client_request_id, "original-client-id")
+        self.assertEqual(error.elapsed_ms, 321)
+        self.assertEqual(error.transport_phase, "response_read")
+        self.assertEqual(error.timeout_subtype, "fixture_timeout")
+
+    def test_connection_error_does_not_persist_raw_exception_text(self) -> None:
+        secret = "transport-secret-must-not-leak"
+        transport = SequenceTransport(URLError(RuntimeError(secret)))
+
+        with self.assertRaises(ProviderError) as caught:
+            client(transport).post_json(
+                url="https://api.example.test/generate",
+                headers={"Authorization": f"Bearer {secret}"},
+                payload={},
+                timeout_seconds=2,
+                max_attempts=1,
+            )
+
+        serialized = json.dumps(caught.exception.to_dict())
+        self.assertNotIn(secret, serialized)
+        self.assertIsNotNone(caught.exception.client_request_id)
+        self.assertEqual(
+            caught.exception.transport_phase,
+            "request_in_flight",
+        )
 
     def test_401_is_classified_and_never_retried(self) -> None:
         secret = "never-disclose-this-key"
@@ -583,6 +987,33 @@ class FactoryAndMockTests(unittest.TestCase):
             ),
             "secret",
         )
+        qwen = create_provider(
+            config(
+                "qwen",
+                (
+                    "https://dashscope-intl.aliyuncs.com/"
+                    "compatible-mode/v1/chat/completions"
+                ),
+                "qwen3.7-max",
+            ),
+            "secret",
+        )
+        cohere = create_provider(
+            config(
+                "cohere",
+                "https://api.cohere.ai/v2/chat",
+                "command-a-plus-05-2026",
+            ),
+            "secret",
+        )
+        upstage = create_provider(
+            config(
+                "upstage",
+                "https://api.upstage.ai/v1/chat/completions",
+                "solar-pro3-260323",
+            ),
+            "secret",
+        )
         mock = create_provider(
             ProviderConfig(
                 name="mock-2",
@@ -597,6 +1028,9 @@ class FactoryAndMockTests(unittest.TestCase):
         self.assertIsInstance(openai, OpenAIProvider)
         self.assertIsInstance(mistral, MistralProvider)
         self.assertIsInstance(xai, XAIProvider)
+        self.assertIsInstance(qwen, QwenProvider)
+        self.assertIsInstance(cohere, CohereProvider)
+        self.assertIsInstance(upstage, UpstageProvider)
         self.assertIsInstance(mock, MockProvider)
 
     def test_mock_is_deterministic_and_emits_valid_jury_json(self) -> None:

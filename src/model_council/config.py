@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
-from .models import ProviderConfig, RunPolicy
+from .models import COUNCIL_STAGES, ProviderConfig, RunPolicy
 
 
 DEFAULT_ENDPOINTS = {
@@ -20,6 +20,12 @@ DEFAULT_ENDPOINTS = {
     ),
     "mistral": "https://api.mistral.ai/v1/chat/completions",
     "xai": "https://api.x.ai/v1/responses",
+    "qwen": (
+        "https://dashscope-intl.aliyuncs.com/"
+        "compatible-mode/v1/chat/completions"
+    ),
+    "cohere": "https://api.cohere.ai/v2/chat",
+    "upstage": "https://api.upstage.ai/v1/chat/completions",
 }
 
 DEFAULT_MODELS = {
@@ -28,6 +34,9 @@ DEFAULT_MODELS = {
     "gemini": "gemini-3.6-flash",
     "mistral": "mistral-medium-3-5",
     "xai": "grok-4.5",
+    "qwen": "qwen3.7-max",
+    "cohere": "command-a-plus-05-2026",
+    "upstage": "solar-pro3-260323",
 }
 
 DEFAULT_SECRETS = {
@@ -36,6 +45,9 @@ DEFAULT_SECRETS = {
     "gemini": "GEMINI_API_KEY",
     "mistral": "MISTRAL_API_KEY",
     "xai": "XAI_API_KEY",
+    "qwen": "DASHSCOPE_API_KEY",
+    "cohere": "COHERE_API_KEY",
+    "upstage": "UPSTAGE_API_KEY",
 }
 
 DEFAULT_LINEAGES = {
@@ -44,6 +56,21 @@ DEFAULT_LINEAGES = {
     "gemini": "google-gemini",
     "mistral": "mistral",
     "xai": "xai-grok",
+    "qwen": "alibaba-qwen",
+    "cohere": "cohere-command",
+    "upstage": "upstage-solar",
+}
+
+DEFAULT_STAGE_MAX_OUTPUT_TOKENS = {
+    "proposal": 3_200,
+    "jury": 2_200,
+    "synthesis": 3_200,
+}
+
+DEFAULT_STAGE_TIMEOUT_SECONDS = {
+    "proposal": 150.0,
+    "jury": 120.0,
+    "synthesis": 180.0,
 }
 
 ALLOWED_ENDPOINT_HOSTS = {
@@ -52,10 +79,31 @@ ALLOWED_ENDPOINT_HOSTS = {
     "gemini": {"generativelanguage.googleapis.com"},
     "mistral": {"api.mistral.ai"},
     "xai": {"api.x.ai"},
+    "qwen": {
+        "dashscope-intl.aliyuncs.com",
+        "dashscope-us.aliyuncs.com",
+        "dashscope.aliyuncs.com",
+        "cn-hongkong.dashscope.aliyuncs.com",
+    },
+    "cohere": {"api.cohere.ai"},
+    "upstage": {"api.upstage.ai"},
     "mock": {"localhost", "127.0.0.1"},
 }
 
-_PROVIDERS_ADDED_AFTER_V0_2 = frozenset({"xai"})
+DEFAULT_LIVE_PROVIDER_NAMES = (
+    "openai",
+    "anthropic",
+    "gemini",
+    "mistral",
+    "xai",
+    "qwen",
+    "cohere",
+)
+OPTIONAL_PROVIDER_NAMES = ("upstage",)
+KNOWN_PROVIDER_NAMES = DEFAULT_LIVE_PROVIDER_NAMES + OPTIONAL_PROVIDER_NAMES
+_PROVIDERS_ADDED_AFTER_V0_2 = frozenset(
+    {"xai", "qwen", "cohere", "upstage"}
+)
 _SECRET_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
@@ -76,12 +124,51 @@ def default_data_dir() -> Path:
 
 def _default_provider(name: str) -> ProviderConfig:
     model_override = os.environ.get(f"MODEL_COUNCIL_{name.upper()}_MODEL")
+    stage_output_tokens = dict(DEFAULT_STAGE_MAX_OUTPUT_TOKENS)
+    stage_timeout_seconds = dict(DEFAULT_STAGE_TIMEOUT_SECONDS)
+    extra: dict[str, Any] = {}
+    if name == "gemini":
+        # Gemini 3 Flash defaults to medium thinking. Thinking tokens count
+        # against the generation budget, which made bounded council artifacts
+        # truncate before visible output completed.
+        stage_output_tokens = {
+            stage: 4_096 for stage in COUNCIL_STAGES
+        }
+        extra["thinking_level"] = "low"
+    elif name == "qwen":
+        # Qwen's JSON-object mode is less reliable when thinking is enabled.
+        # Keep the bounded council protocol deterministic unless an operator
+        # explicitly opts into and budgets thinking in a reviewed config.
+        extra["enable_thinking"] = False
+        # Live canaries show that Qwen's long council prompts can legitimately
+        # run past the generic stage limits. Keep them bounded, but leave
+        # enough room for a complete response.
+        stage_timeout_seconds = {
+            "proposal": 300.0,
+            "jury": 300.0,
+            "synthesis": 360.0,
+        }
+    elif name == "cohere":
+        # Command A+ enables thinking by default. Bound it so the 2,200-token
+        # jury allowance still leaves more than Cohere's recommended 1,000
+        # tokens for the visible response.
+        extra["thinking"] = {"token_budget": 800}
+        # Cohere cannot decoder-enforce CouncilLogic's array-item bounds.
+        # Zero-temperature sampling reduces count drift in structured artifacts.
+        extra["temperature"] = 0
+    elif name == "upstage":
+        # Solar Pro 3 medium/high reasoning reserves at least 4,096/8,192
+        # tokens. Low disables reasoning and fits the bounded council stages.
+        extra["reasoning_effort"] = "low"
     return ProviderConfig(
         name=name,
         model=model_override or DEFAULT_MODELS[name],
         lineage=DEFAULT_LINEAGES[name],
         secret_name=DEFAULT_SECRETS[name],
         endpoint=DEFAULT_ENDPOINTS[name],
+        stage_max_output_tokens=stage_output_tokens,
+        stage_timeout_seconds=stage_timeout_seconds,
+        extra=extra,
     )
 
 
@@ -89,9 +176,12 @@ def default_config() -> AppConfig:
     return AppConfig(
         providers=tuple(
             _default_provider(name)
-            for name in ("openai", "anthropic", "gemini", "mistral", "xai")
+            for name in DEFAULT_LIVE_PROVIDER_NAMES
         ),
-        policy=RunPolicy(),
+        # Seven clean participants require 15 calls. Preserve the previous
+        # five-call recovery margin rather than making the larger default
+        # topology consume the entire application-level budget.
+        policy=RunPolicy(max_calls=20, jury_repair_attempts=1),
         synthesis_provider="openai",
         data_dir=default_data_dir(),
     )
@@ -131,6 +221,21 @@ def validate_provider_config(config: ProviderConfig) -> None:
         raise ValueError(f"{config.name}: timeout_seconds must be positive")
     if not 1 <= config.max_attempts <= 10:
         raise ValueError(f"{config.name}: max_attempts must be between 1 and 10")
+    for field_name, values in (
+        ("stage_max_output_tokens", config.stage_max_output_tokens),
+        ("stage_timeout_seconds", config.stage_timeout_seconds),
+    ):
+        unknown = set(values) - COUNCIL_STAGES
+        if unknown:
+            raise ValueError(
+                f"{config.name}: {field_name} has unknown stages: "
+                f"{', '.join(sorted(unknown))}"
+            )
+        for stage, value in values.items():
+            if value <= 0:
+                raise ValueError(
+                    f"{config.name}: {field_name}.{stage} must be positive"
+                )
     _validate_endpoint(config)
 
 
@@ -145,6 +250,18 @@ def validate_run_policy(
             raise ValueError(f"{field_name} must be positive")
     if policy.deadline_seconds <= 0:
         raise ValueError("deadline_seconds must be positive")
+    if policy.max_parallel_calls < 1:
+        raise ValueError("max_parallel_calls must be positive")
+    if policy.max_question_chars < 1:
+        raise ValueError("max_question_chars must be positive")
+    if policy.max_stage_prompt_chars < 1:
+        raise ValueError("max_stage_prompt_chars must be positive")
+    if not 0 <= policy.jury_repair_attempts <= 1:
+        raise ValueError("jury_repair_attempts must be 0 or 1")
+    if not 0 <= policy.truncation_retries <= 1:
+        raise ValueError("truncation_retries must be 0 or 1")
+    if policy.max_recovery_output_tokens < 1:
+        raise ValueError("max_recovery_output_tokens must be positive")
     if policy.proposal_quorum > len(providers):
         raise ValueError("Proposal quorum exceeds enabled provider count")
     if policy.jury_quorum > len(providers):
@@ -176,7 +293,10 @@ def load_config(path: str | Path | None = None) -> AppConfig:
     provider_raw = dict(raw.get("providers") or {})
 
     providers: list[ProviderConfig] = []
-    defaults = {provider.name: provider for provider in base.providers}
+    defaults = {
+        name: _default_provider(name)
+        for name in KNOWN_PROVIDER_NAMES
+    }
     for name, default in defaults.items():
         # A file-backed configuration written before a provider was added must
         # not silently acquire another credential requirement or billable
@@ -198,13 +318,39 @@ def load_config(path: str | Path | None = None) -> AppConfig:
             ),
             max_attempts=int(override.get("max_attempts", default.max_attempts)),
             enabled=bool(override.get("enabled", default.enabled)),
-            extra=dict(override.get("extra") or {}),
+            stage_max_output_tokens={
+                str(stage): int(limit)
+                for stage, limit in dict(
+                    override.get(
+                        "stage_max_output_tokens",
+                        default.stage_max_output_tokens,
+                    )
+                    or {}
+                ).items()
+            },
+            stage_timeout_seconds={
+                str(stage): float(limit)
+                for stage, limit in dict(
+                    override.get(
+                        "stage_timeout_seconds",
+                        default.stage_timeout_seconds,
+                    )
+                    or {}
+                ).items()
+            },
+            extra={
+                **default.extra,
+                **dict(override.get("extra") or {}),
+            },
         )
         if provider.enabled:
             validate_provider_config(provider)
             providers.append(provider)
 
-    policy = RunPolicy.from_dict({**base.policy.to_dict(), **policy_raw})
+    # File-backed configurations retain the pre-expansion policy defaults.
+    # This avoids silently increasing the billable recovery ceiling for an
+    # existing operator config; new seven-provider files should set 20.
+    policy = RunPolicy.from_dict({**RunPolicy().to_dict(), **policy_raw})
     synthesis_provider = str(
         run_raw.get("synthesis_provider", base.synthesis_provider)
     )
