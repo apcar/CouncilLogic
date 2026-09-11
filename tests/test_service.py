@@ -923,7 +923,9 @@ class CouncilServiceLifecycleTests(unittest.TestCase):
                         started_calls += 1
                         if started_calls >= 4:
                             started.set()
-                    release.wait(timeout=3)
+                    # Keep the gate closed until the test explicitly releases it.
+                    # The finally block also releases it if startup or submission fails.
+                    release.wait()
                     return original(**kwargs)  # type: ignore[operator]
 
                 return generate
@@ -940,7 +942,10 @@ class CouncilServiceLifecycleTests(unittest.TestCase):
                     question="First slow run.",
                     idempotency_key="same-principal-slow-1",
                 )
-                self.assertTrue(started.wait(timeout=1))
+                self.assertTrue(
+                    started.wait(timeout=30),
+                    "Mock proposal workers did not reach the serialization gate",
+                )
                 second = application.create_run(
                     principal,  # type: ignore[arg-type]
                     question="Second slow run.",
