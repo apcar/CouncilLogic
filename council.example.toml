@@ -2,6 +2,7 @@
 # Override with MODEL_COUNCIL_DATA_DIR when preferred.
 data_dir = "~/.local/share/model-council"
 synthesis_provider = "openai"
+synthesis_fallbacks = ["anthropic", "gemini"]
 
 [policy]
 proposal_quorum = 3

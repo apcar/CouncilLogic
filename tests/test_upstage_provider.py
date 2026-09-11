@@ -180,12 +180,12 @@ class UpstageProviderTests(unittest.TestCase):
             )
         )
         self.assertIn(
-            "600 characters",
+            "350 characters under the provider generation limit",
             provider_schema["properties"]["outcome"]["description"],
         )
-        canonical_schema = structured_output_schema("proposal")
-        self.assertIsNotNone(canonical_schema)
-        self.assertIn("maxLength", schema_keys(canonical_schema))
+        generation_schema = structured_output_schema("proposal")
+        self.assertIsNotNone(generation_schema)
+        self.assertIn("maxLength", schema_keys(generation_schema))
         self.assertNotIn("upstage-secret", json.dumps(body))
         self.assertNotIn("upstage-secret", json.dumps(parsed.to_dict()))
 

@@ -21,7 +21,7 @@ class ReleaseMetadataTests(unittest.TestCase):
         readme = (ROOT / "README.md").read_text("utf-8")
         changelog = (ROOT / "CHANGELOG.md").read_text("utf-8")
 
-        self.assertEqual(PACKAGE_VERSION, "0.3.0a1")
+        self.assertEqual(PACKAGE_VERSION, "0.3.1a1")
         self.assertEqual(__version__, PACKAGE_VERSION)
         self.assertEqual(project["project"]["version"], PACKAGE_VERSION)
         self.assertRegex(
@@ -33,7 +33,7 @@ class ReleaseMetadataTests(unittest.TestCase):
 
     def test_independently_versioned_surfaces_remain_explicit(self) -> None:
         self.assertEqual(PROTOCOL_ID, "independent-jury")
-        self.assertEqual(PROTOCOL_VERSION, "1.2.1-beta")
+        self.assertEqual(PROTOCOL_VERSION, "1.2.2-beta")
         self.assertEqual(MOCK_SERVICE_PROFILE_VERSION, "0.2.0a1")
         self.assertEqual(
             CouncilRequestHandler.server_version,

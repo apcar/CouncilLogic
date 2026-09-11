@@ -18,9 +18,11 @@ from model_council.protocol import (  # noqa: E402
     jury_repair_prompts,
     parse_jury,
     parse_proposal,
+    proposal_generation_json_schema,
     proposal_json_schema,
     proposal_prompts,
     protocol_hash,
+    structured_output_schema,
     synthesis_prompts,
 )
 
@@ -334,6 +336,51 @@ class PromptAndIdentityTests(unittest.TestCase):
         )
         self.assertFalse(schema["additionalProperties"])
 
+    def test_provider_proposal_schema_enforces_stricter_generation_targets(
+        self,
+    ) -> None:
+        schema = structured_output_schema("proposal")
+
+        self.assertIsNotNone(schema)
+        self.assertEqual(schema, proposal_generation_json_schema())
+        properties = schema["properties"]
+        self.assertEqual(properties["outcome"]["maxLength"], 350)
+        self.assertEqual(
+            properties["evidence_and_reasoning"]["maxItems"],
+            3,
+        )
+        self.assertEqual(
+            properties["evidence_and_reasoning"]["items"]["maxLength"],
+            180,
+        )
+        self.assertEqual(properties["uncertainty"]["maxItems"], 2)
+        self.assertEqual(
+            properties["uncertainty"]["items"]["maxLength"],
+            120,
+        )
+        self.assertEqual(
+            properties["verification_needed"]["maxItems"],
+            3,
+        )
+        self.assertEqual(
+            properties["verification_needed"]["items"]["maxLength"],
+            120,
+        )
+        self.assertIn("provider generation limit", schema["description"])
+
+        local_schema = proposal_json_schema()
+        self.assertEqual(
+            local_schema["properties"]["outcome"]["maxLength"],
+            600,
+        )
+        self.assertEqual(
+            local_schema["properties"]["evidence_and_reasoning"][
+                "maxItems"
+            ],
+            4,
+        )
+        self.assertIn("local hard limit", local_schema["description"])
+
     def test_jury_schema_requires_every_protocol_field(self) -> None:
         schema = jury_json_schema()
 
@@ -395,26 +442,29 @@ class PromptAndIdentityTests(unittest.TestCase):
         self.assertIn('"evidence_and_reasoning"', proposal_system)
         self.assertIn("valid finished object", proposal_system)
         self.assertIn(
-            "Target at most three evidence_and_reasoning and\n"
-            "verification_needed items and at most two uncertainty items",
+            "Treat these generation targets as limits for your response",
             proposal_system,
         )
         self.assertIn(
-            "A numbered request\n"
-            "or a requested number of deliverables",
+            "outcome must be no more than 350 characters",
             proposal_system,
         )
         self.assertIn(
-            "does not change these\n"
-            "array limits or require one array item per requested deliverable",
+            "at most three items of no more than 180 characters each",
             proposal_system,
         )
+        self.assertIn(
+            "at most two items of no more than 120 characters each",
+            proposal_system,
+        )
+        self.assertIn(
+            "at most three items of no more than 120 characters each",
+            proposal_system,
+        )
+        self.assertIn("audit all four fields", proposal_system)
         self.assertIn("merge or remove lower-priority", proposal_system)
-        self.assertIn(
-            "absolute maxima are four evidence_and_reasoning items, three\n"
-            "uncertainty items, and four verification_needed items",
-            proposal_system,
-        )
+        self.assertIn("Do not split one overlong item", proposal_system)
+        self.assertIn("do not use that headroom deliberately", proposal_system)
         self.assertIn("untrusted question data", proposal_user)
         self.assertIn("metadata-blind", jury_system)
         self.assertIn('"winner"', jury_system)
@@ -435,10 +485,10 @@ class PromptAndIdentityTests(unittest.TestCase):
 
     def test_protocol_identity_and_stable_hash(self) -> None:
         self.assertEqual(PROTOCOL_ID, "independent-jury")
-        self.assertEqual(PROTOCOL_VERSION, "1.2.1-beta")
+        self.assertEqual(PROTOCOL_VERSION, "1.2.2-beta")
         self.assertEqual(
             protocol_hash(),
-            "3c9b50e41bc1aa8fa1bea769c98ee4d6908b63f586c78d95b9097e0604503ee6",
+            "f46d419ffe1c26fdc6f2f4fee38fde0c28c28659256762af2fd9c9ae774daaf8",
         )
 
 

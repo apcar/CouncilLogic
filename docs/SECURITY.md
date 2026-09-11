@@ -2,8 +2,8 @@
 
 ## Public-alpha posture
 
-CouncilLogic `0.3.0a1` retains the hardened, governed `0.2.0a1` mock-service
-profile alongside the single-user live CLI. The service is mock-only,
+The CouncilLogic `0.3.1a1` release candidate retains the hardened, governed
+`0.2.0a1` mock-service profile alongside the single-user live CLI. The service is mock-only,
 loopback-only, and must not be exposed as a public network daemon. It has
 application-level multi-principal controls, but it is not a production
 identity, billing, or Internet-facing system. Live service, a remote front
@@ -203,11 +203,14 @@ separately.
 ### Constrained proposal and jury output
 
 Proposal and jury calls include fixed, non-sensitive JSON Schemas so providers
-can constrain output before it reaches the local parser. Proposal field sizes
-and list counts are bounded; synthesis receives those bounded artifacts and
-compact vote records rather than full jury prose. No question, candidate text,
-personal data, or secret is placed in a schema itself. The application still
-validates every returned object and jury candidate label locally. When a
+can constrain output before it reaches the local parser. The proposal schema
+sent for generation uses narrower targets than the canonical local schema,
+leaving bounded tolerance for provider drift without weakening local
+validation. Proposal field sizes and list counts are bounded; synthesis
+receives those bounded artifacts and compact vote records rather than full jury
+prose. No question, candidate text, personal data, or secret is placed in a
+schema itself. The application still validates every returned object and jury
+candidate label locally. When a
 provider does not implement a portable length or item-count keyword, the
 adapter removes that keyword, preserves its bound in the field description,
 and still enforces the canonical bound after the response returns.
@@ -314,22 +317,30 @@ outcomes are not automatically retried. These controls improve recovery and
 reduce duplicate billable calls but do not guarantee availability.
 
 Before provider work begins, deterministic character-count preflight rejects
-questions or projected downstream prompts beyond configured limits. A known,
-non-ambiguous output-length completion may be retried once with a larger
+questions or projected downstream prompts beyond configured limits. The same
+check is available through credential-free, storage-free `council plan`. A
+known, non-ambiguous output-length completion may be retried once with a larger
 bounded output allowance; its initial raw response is preserved first.
 When enabled, each eligible invalid jury may consume one additional
 application-level same-provider repair call. Repairs share `max_calls`, are
 prioritized in provider-configuration order, inherit jury token/timeout and
-lower-level transport-retry settings, and cannot consume the synthesis-reserved
-call. A dispatched repair is never logically replayed, repaired again, or
-given output-length recovery; an ambiguous outcome stays excluded.
+lower-level transport-retry settings, and cannot consume calls reserved for
+jury quorum or the complete ordered synthesis chain. A dispatched repair is
+never logically replayed, repaired again, or given output-length recovery; an
+ambiguous outcome stays excluded.
 Ambiguous timeouts, connection failures, and crash-left-running calls remain
-non-retryable. Completed runs with any provider failure or recovery are marked
-`completion_quality=degraded`.
+non-retryable. The no-config live synthesis chain advances through OpenAI,
+Anthropic, and Gemini in order and persists each attempt and transition; a
+transition prevents reentry into the prior slot. A fallback success is marked
+`completion_quality=degraded`. The current final slot retains bounded,
+non-ambiguous resume retry behavior; an ambiguous attempt remains suppressed.
 
 Transport failure records contain a generated client request ID and sanitized
 numeric/taxonomy metadata (`elapsed_ms`, `transport_phase`, and
-`timeout_subtype`). Raw transport exception text is deliberately excluded.
+`timeout_subtype`). Recognized provider responses may also retain a normalized,
+allowlisted error code such as `model_not_found`, `invalid_argument`,
+`insufficient_quota`, or `unavailable`. Raw response bodies, provider messages,
+and transport exception text are deliberately excluded.
 
 CLI `max_calls` and service call units count application-level logical provider
 invocations, not HTTP attempts made inside provider retry loops.

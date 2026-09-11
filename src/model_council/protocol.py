@@ -15,15 +15,22 @@ from typing import Any
 
 
 PROTOCOL_ID = "independent-jury"
-PROTOCOL_VERSION = "1.2.1-beta"
+PROTOCOL_VERSION = "1.2.2-beta"
 CANDIDATE_LABEL_PREFIX = "CANDIDATE_"
 
+PROPOSAL_OUTCOME_TARGET_CHARS = 350
 PROPOSAL_OUTCOME_MAX_CHARS = 600
+PROPOSAL_REASON_TARGET_ITEMS = 3
 PROPOSAL_REASON_MAX_ITEMS = 4
+PROPOSAL_REASON_TARGET_CHARS = 180
 PROPOSAL_REASON_MAX_CHARS = 350
+PROPOSAL_UNCERTAINTY_TARGET_ITEMS = 2
 PROPOSAL_UNCERTAINTY_MAX_ITEMS = 3
+PROPOSAL_UNCERTAINTY_TARGET_CHARS = 120
 PROPOSAL_UNCERTAINTY_MAX_CHARS = 280
+PROPOSAL_VERIFICATION_TARGET_ITEMS = 3
 PROPOSAL_VERIFICATION_MAX_ITEMS = 4
+PROPOSAL_VERIFICATION_TARGET_CHARS = 120
 PROPOSAL_VERIFICATION_MAX_CHARS = 280
 
 JURY_RATIONALE_MAX_CHARS = 1_000
@@ -57,19 +64,21 @@ these keys:
 }
 
 Keep every field concise and complete. Prioritize a valid finished object over
-additional detail. Target no more than 350 characters in outcome, 180
-characters per evidence_and_reasoning item, and 120 characters per uncertainty
-or verification_needed item. Target at most three evidence_and_reasoning and
-verification_needed items and at most two uncertainty items. A numbered request
-or a requested number of deliverables in the question does not change these
-array limits or require one array item per requested deliverable. State the
-complete recommendation compactly in outcome; use the arrays only for the
-strongest supporting reasons, uncertainties, and checks. Before returning,
-count each array. If a draft exceeds a target, merge or remove lower-priority
-items until it meets that target. The schema permits modest headroom beyond the
-targets, but the absolute maxima are four evidence_and_reasoning items, three
-uncertainty items, and four verification_needed items. Never pad a field to its
-limit. Do not add keys. Do not force certainty."""
+additional detail. Treat these generation targets as limits for your response:
+outcome must be no more than 350 characters; evidence_and_reasoning must have
+at most three items of no more than 180 characters each; uncertainty must have
+at most two items of no more than 120 characters each; verification_needed
+must have at most three items of no more than 120 characters each.
+
+A numbered request or a requested number of deliverables in the question does
+not change these limits or require one array item per requested deliverable.
+State the complete recommendation compactly in outcome; use the arrays only for
+the strongest supporting reasons, uncertainties, and checks. Before returning,
+audit all four fields. Rewrite an overlong field; merge or remove lower-priority
+items from an overfull array. Do not split one overlong item into extra items or
+move overflow into another field. The local protocol permits modest hard-bound
+headroom for provider drift, but do not use that headroom deliberately. Never
+pad a field to its limit. Do not add keys. Do not force certainty."""
 
 
 _PROPOSAL_USER_TEMPLATE = """\
@@ -234,8 +243,18 @@ def candidate_label(index: int) -> str:
     return f"{CANDIDATE_LABEL_PREFIX}{index + 1:02d}"
 
 
-def proposal_json_schema() -> dict[str, Any]:
-    """Return the bounded JSON Schema for independent proposal artifacts."""
+def _proposal_json_schema(
+    *,
+    outcome_max_chars: int,
+    reason_max_items: int,
+    reason_max_chars: int,
+    uncertainty_max_items: int,
+    uncertainty_max_chars: int,
+    verification_max_items: int,
+    verification_max_chars: int,
+    limit_name: str,
+) -> dict[str, Any]:
+    """Build a proposal schema with explicit bounds in every description."""
 
     def bounded_string(
         description: str,
@@ -245,7 +264,8 @@ def proposal_json_schema() -> dict[str, Any]:
             "type": "string",
             "description": (
                 f"{description} Must contain between 1 and {max_chars} "
-                "characters."
+                f"characters under the {limit_name}. Rewrite it shorter "
+                "before returning if needed."
             ),
             "minLength": 1,
             "maxLength": max_chars,
@@ -259,7 +279,9 @@ def proposal_json_schema() -> dict[str, Any]:
         return {
             "type": "array",
             "description": (
-                f"{description} Must contain at most {max_items} items."
+                f"{description} Must contain at most {max_items} items under "
+                f"the {limit_name}. Merge or remove lower-priority items "
+                "before returning if needed."
             ),
             "maxItems": max_items,
             "items": bounded_string(
@@ -270,26 +292,31 @@ def proposal_json_schema() -> dict[str, Any]:
 
     return {
         "type": "object",
+        "description": (
+            "Return exactly one concise four-field proposal object. Every "
+            f"length and item-count bound is a {limit_name}; audit all four "
+            "fields before returning."
+        ),
         "properties": {
             "outcome": bounded_string(
                 "The recommended outcome or a clear statement that none is "
                 "supported.",
-                PROPOSAL_OUTCOME_MAX_CHARS,
+                outcome_max_chars,
             ),
             "evidence_and_reasoning": string_array(
                 "Material evidence and reasoning, one reason per item.",
-                PROPOSAL_REASON_MAX_ITEMS,
-                PROPOSAL_REASON_MAX_CHARS,
+                reason_max_items,
+                reason_max_chars,
             ),
             "uncertainty": string_array(
                 "Material uncertainties or assumptions, one per item.",
-                PROPOSAL_UNCERTAINTY_MAX_ITEMS,
-                PROPOSAL_UNCERTAINTY_MAX_CHARS,
+                uncertainty_max_items,
+                uncertainty_max_chars,
             ),
             "verification_needed": string_array(
                 "Specific checks needed before relying on the outcome.",
-                PROPOSAL_VERIFICATION_MAX_ITEMS,
-                PROPOSAL_VERIFICATION_MAX_CHARS,
+                verification_max_items,
+                verification_max_chars,
             ),
         },
         "required": [
@@ -300,6 +327,36 @@ def proposal_json_schema() -> dict[str, Any]:
         ],
         "additionalProperties": False,
     }
+
+
+def proposal_json_schema() -> dict[str, Any]:
+    """Return the locally accepted hard-bound proposal JSON Schema."""
+
+    return _proposal_json_schema(
+        outcome_max_chars=PROPOSAL_OUTCOME_MAX_CHARS,
+        reason_max_items=PROPOSAL_REASON_MAX_ITEMS,
+        reason_max_chars=PROPOSAL_REASON_MAX_CHARS,
+        uncertainty_max_items=PROPOSAL_UNCERTAINTY_MAX_ITEMS,
+        uncertainty_max_chars=PROPOSAL_UNCERTAINTY_MAX_CHARS,
+        verification_max_items=PROPOSAL_VERIFICATION_MAX_ITEMS,
+        verification_max_chars=PROPOSAL_VERIFICATION_MAX_CHARS,
+        limit_name="local hard limit",
+    )
+
+
+def proposal_generation_json_schema() -> dict[str, Any]:
+    """Return stricter provider constraints with local headroom for drift."""
+
+    return _proposal_json_schema(
+        outcome_max_chars=PROPOSAL_OUTCOME_TARGET_CHARS,
+        reason_max_items=PROPOSAL_REASON_TARGET_ITEMS,
+        reason_max_chars=PROPOSAL_REASON_TARGET_CHARS,
+        uncertainty_max_items=PROPOSAL_UNCERTAINTY_TARGET_ITEMS,
+        uncertainty_max_chars=PROPOSAL_UNCERTAINTY_TARGET_CHARS,
+        verification_max_items=PROPOSAL_VERIFICATION_TARGET_ITEMS,
+        verification_max_chars=PROPOSAL_VERIFICATION_TARGET_CHARS,
+        limit_name="provider generation limit",
+    )
 
 
 def jury_json_schema() -> dict[str, Any]:
@@ -387,7 +444,7 @@ def jury_json_schema() -> dict[str, Any]:
 
 def structured_output_schema(stage: str) -> dict[str, Any] | None:
     if stage == "proposal":
-        return proposal_json_schema()
+        return proposal_generation_json_schema()
     if stage == "jury":
         return jury_json_schema()
     return None
@@ -990,6 +1047,9 @@ def protocol_hash() -> str:
             "synthesis_user": _SYNTHESIS_USER_TEMPLATE,
             "proposal_keys": sorted(_PROPOSAL_KEYS),
             "proposal_json_schema": proposal_json_schema(),
+            "proposal_generation_json_schema": (
+                proposal_generation_json_schema()
+            ),
             "jury_keys": sorted(_JURY_KEYS),
             "confidence_values": sorted(_CONFIDENCE_VALUES),
             "jury_json_schema": jury_json_schema(),
@@ -1016,6 +1076,7 @@ __all__ = [
     "jury_json_schema",
     "parse_jury",
     "parse_proposal",
+    "proposal_generation_json_schema",
     "proposal_json_schema",
     "proposal_prompts",
     "protocol_hash",

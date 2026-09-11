@@ -152,13 +152,16 @@ council --mock --data-dir ./work/release-gate list
 Before live use:
 
 1. Review `council.example.toml` and select the intended data directory.
-2. Configure credentials for every configured provider through the environment
+2. Run `council --config ./council.toml plan --file ./work/question.txt` and
+   verify that the packet, participant roster, synthesis chain, and mandatory
+   call count fit policy.
+3. Configure credentials for every configured provider through the environment
    or a tested external secret command.
-3. Run `council --config ./council.toml doctor`.
-4. Run `council --config ./council.toml providers` and verify every provider,
+4. Run `council --config ./council.toml doctor`.
+5. Run `council --config ./council.toml providers` and verify every provider,
    model, and lineage.
-5. Run one low-risk, non-sensitive live question.
-6. Inspect and export that run; verify the result, failure record, permissions,
+6. Run one low-risk, non-sensitive live question.
+7. Inspect and export that run; verify the result, failure record, permissions,
    latency, reported usage, and provider billing consoles.
 
 `doctor` is a local preflight. It does not contact provider APIs or validate
@@ -180,8 +183,35 @@ council doctor --data-dir ./private-data
 ```
 
 Use the same global options for `run`, `resume`, `inspect`, `list`, and
-`export`. Otherwise a command can silently point at a different configured
+`export`; `plan` also accepts `--config` and `--mock` but does not open the data
+directory. Otherwise a command can silently point at a different configured
 database and report that a run is unknown.
+
+## Planning a run
+
+Plan substantial input before resolving credentials or creating a run:
+
+```bash
+council --config ./council.toml plan \
+  --file ./work/question.txt \
+  --json
+```
+
+`plan` accepts the same provider, synthesis, quorum, call-budget, deadline, and
+packet-limit overrides as `run`. It does not resolve credentials, open SQLite,
+or call a provider. The result reports the exact question character count,
+worst-case prompt size for every reachable stage, configured synthesis order,
+mandatory call count, recovery headroom, effective plain-ASCII question limit,
+and remaining headroom. Arbitrary Unicode or JSON-escaped input can consume
+more serialized space than the plain-ASCII capacity; the supplied packet's
+projected stage sizes remain authoritative.
+
+A workload-limit rejection prints the complete plan, returns exit code `2`,
+and can be fixed without creating a run record or incurring provider usage.
+Provider-selection and policy-validation errors also return `2`, but fail
+before a plan is constructed. Do not bypass a workload rejection by splitting
+one logical task into prompts that omit necessary context. Reduce redundant
+context or deliberately review a policy change.
 
 ## Starting a run
 
@@ -213,12 +243,13 @@ Treat each idempotency key as permanent within a database. Reusing it with a
 different locked request fails. Use a key that contains no secret or personal
 data.
 
-The default seven-provider live path has fifteen application-level provider
-calls: seven proposals, seven juries, and one synthesis. Proposal and jury
-stages run in parallel. The default 20-call ceiling leaves five recovery slots,
-but a normal clean run still makes fifteen calls. Successful stage/provider
-slots are reused on resume. The mock-only service remains a four-lineage,
-nine-call fixture.
+The default seven-provider live path makes fifteen application-level provider
+calls when the primary synthesis succeeds: seven proposals, seven juries, and
+one synthesis. Its ordered synthesis chain is OpenAI, Anthropic, then Gemini,
+so the mandatory graph reserves up to seventeen calls. Proposal and jury
+stages run in parallel. The default 20-call ceiling leaves three recovery
+slots. Successful stage/provider slots are reused on resume. The mock-only
+service remains a four-lineage, nine-call fixture with one synthesizer.
 
 The default Cohere configuration pins `temperature = 0` because Cohere's
 structured-output subset cannot enforce array item counts. This reduces count
@@ -245,6 +276,23 @@ truncation_retries = 1
 max_recovery_output_tokens = 8192
 ```
 
+The no-config live synthesis settings are equivalent to:
+
+```toml
+[run]
+synthesis_provider = "openai"
+synthesis_fallbacks = ["anthropic", "gemini"]
+```
+
+For one command, `--synthesis-provider NAME` selects a one-provider chain and
+`--synthesis-providers NAME,NAME,...` supplies the complete ordered chain. The
+two forms are mutually exclusive. Every name must be enabled and unique. A
+file-backed configuration that omits `synthesis_fallbacks` retains the legacy
+one-provider behavior; fallbacks are never silently added to an existing file.
+When `--providers` narrows the no-config default roster without a synthesis
+override, the primary must remain selected and implicit fallbacks outside that
+roster are removed. Explicit CLI and file-backed chains remain exact.
+
 The no-config live CLI and `council.example.toml` use the 20-call ceiling and
 enable one decision-locked jury repair per eligible invalid ballot. A bare
 `RunPolicy()`, mock/service configuration, and any file-backed configuration
@@ -268,9 +316,10 @@ council --config ./council.toml run \
   --deadline-seconds 900
 ```
 
-The application rejects an impossible quorum, insufficient lineage diversity,
-a synthesis provider outside the selected providers, or a logical call budget
-smaller than `2 × selected providers + 1`.
+The application rejects duplicate selected providers, an impossible quorum,
+insufficient lineage diversity, a synthesis provider outside the selected
+providers, duplicate synthesis choices, or a logical call budget smaller than
+`2 × selected providers + configured synthesis attempts`.
 
 `max_calls` counts application-level provider-call attempts. Retrying a failed
 slot on resume consumes another count, although its audit history stays in the
@@ -320,7 +369,8 @@ The original `jury` response and separate `jury_repair` invocation are both
 preserved. Repair priority follows configured provider order. Each repair uses
 one shared `max_calls` unit and inherits the provider's jury schema, output
 budget, timeout, and bounded lower-level HTTP retry policy. CouncilLogic always
-reserves one application call for synthesis. It does not perform a second
+reserves the full remaining mandatory graph: enough jury calls to reach quorum
+and every configured synthesis attempt. It does not perform a second
 logical repair, an output-length recovery of a repair, or an automatic replay
 after a dispatched repair fails or has an ambiguous outcome. A locally blocked
 repair that was never dispatched may still use its one attempt after an
@@ -336,11 +386,14 @@ fourth provider stage. Qwen's default stage timeouts are 300 seconds for
 proposal and jury and 360 seconds for synthesis; the other default providers
 retain the generic 150/120/180-second stage limits.
 
-`deadline_seconds` is cooperative. It prevents later work from starting once
-the deadline is observed, but it is not a process watchdog. An in-flight call
-can continue through its configured request timeout and retries. For a harder
-bound, use an external process supervisor and understand that termination may
-leave a resumable run.
+`deadline_seconds` is finite, positive, and cooperative. Workers recheck it
+before creating an invocation and immediately before provider dispatch, so a
+request that expires while queued is not mislabeled as an ambiguous upstream
+call. At dispatch, the adapter timeout is capped at the smaller of its
+configured stage timeout and the run time remaining. Once provider work begins,
+the deadline does not forcibly cancel it; bounded lower-level retries can
+therefore finish after the deadline. For a harder bound, use an external
+process supervisor and understand that termination may leave a resumable run.
 
 ## Status and exit codes
 
@@ -365,7 +418,10 @@ means the run completed with no provider failure or recovery; `degraded`
 covers partial/failed runs and completed answers with such events. Inspect the
 `recoveries` array and `membership.recovered_jury_repairs`; a successfully
 repaired ballot can produce a completed run with no top-level provider failure
-and still requires review.
+and still requires review. Also inspect `synthesis`: it reports configured
+order, each slot outcome and application-level `call_count`, and the selected
+provider and position. Same-slot recovery details remain in `recoveries` and
+the audit events. A successful fallback is completed but degraded.
 
 ## Inspect, list, and export
 
@@ -383,11 +439,11 @@ council --config ./council.toml export RUN_ID \
 
 JSON inspection and export include the question, stored run configuration,
 result, prompts, raw response text, provider metadata, errors, workload
-preflight, and audit events. Markdown export also preserves truncated-response
-events, incomplete repair responses, and jury-repair outcome events. Potential
-and actual prompt telemetry may include a `jury_repair` stage. Treat exports as
-sensitive. The application sets an export file to mode `0600` but does not
-encrypt it.
+preflight, and audit events. Markdown export also preserves truncated-response,
+undispatched-call, incomplete-repair, jury-repair, and synthesis-transition
+events. Potential and actual prompt telemetry may include a `jury_repair`
+stage. Treat exports as sensitive. The application sets an export file to mode
+`0600` but does not encrypt it.
 
 ## Resume and interrupted runs
 
@@ -398,14 +454,15 @@ council --config ./council.toml resume RUN_ID --json
 ```
 
 Resume reconstructs the original provider, model, endpoint, policy, and
-synthesis-provider lock from the persisted run. The supplied config is used to
-locate the database, not to replace those locked choices. It reuses completed
-invocations and can retry absent or non-ambiguous failed logical slots. A call
-left `running` by a crash, or a failed call whose outcome may have reached the
-provider, is marked ambiguous and is **not** automatically retried; this avoids
-silently duplicating a potentially billable request. Start a new run only
-after reviewing the provider logs and deciding that another call is
-appropriate.
+ordered synthesis-chain lock from the persisted run. The supplied config is
+used to locate the database, not to replace those locked choices. It reuses
+completed invocations and can retry eligible absent or non-ambiguous failed
+logical slots only while the stage-specific membership locks and retry rules
+permit. A call left `running` by a crash, or a failed call whose outcome may
+have reached the provider, is marked ambiguous and is **not** automatically
+retried; this avoids silently duplicating a potentially billable request.
+Start a new run only after reviewing the provider logs and deciding that
+another call is appropriate.
 
 Candidate membership and its blinded label namespace are durably locked before
 the first jury dispatch. Once jury quorum exists, the ordered adjudication
@@ -428,8 +485,9 @@ in progress; a recovered retry therefore remains `completion_quality=degraded`.
 Resume refuses a run when the protocol hash or the entire ordered provider
 configuration lock differs from the current application. That lock includes
 models, lineages, endpoints, stage budgets, and provider-specific options such
-as temperature. Keep the original release and configuration until important
-partial runs are finished or exported.
+as temperature. Keep a compatible release until important partial runs are
+finished or exported. The database already contains the provider and policy
+lock; a supplied TOML remains only a valid locator for that database.
 
 The alpha does not include a run-lock migration command. Do not edit the
 SQLite database to force compatibility. Resume still resolves the stored
@@ -457,16 +515,18 @@ keys are regional and are not interchangeable.
 
 ### Authentication or permission failure
 
-Inspect the run's structured failure category and provider request ID. Confirm
+Inspect the run's structured failure category, allowlisted provider error code,
+and provider or generated client request ID. Confirm
 the credential belongs to the intended project and that the configured model
 is enabled. Rotate a suspected credential before retrying.
 
 ### Model not found or invalid request
 
 Compare `council providers` with the provider's current official model catalog.
-Change the model in a reviewed TOML file. A partial run locked to the old model
-cannot be resumed under the new provider lock; retain the old config if it must
-be completed.
+Change the model in a reviewed TOML file for new runs. Resume reconstructs a
+partial run's prior model and provider choices from its database lock, provided
+the installed release and protocol remain compatible. Use `--config` or
+`--data-dir` to locate that same database; neither replaces the stored lock.
 
 ### Rate limiting or provider server failure
 
@@ -527,8 +587,16 @@ raising output budgets.
 
 ### Synthesis did not complete
 
-The run should be `partial` with proposals, juries, and aggregate preserved.
-After the cause is corrected, resume using the exact provider lock.
+Inspect the ordered synthesis attempts. The engine gives each configured slot
+one ordinary attempt within an execution and stops at the first completed
+synthesis response. A `finish_reason=length` response may additionally use the
+configured one-shot same-provider truncation recovery at that slot. Any
+fallback completion is degraded. A durable fallback transition prevents
+reentry into the prior slot. If all attempts fail, the run should be `partial`
+with proposals, juries, aggregate, and every slot outcome and recovery
+preserved. After the cause is corrected, resume using the exact provider and
+synthesis-chain lock. The current final slot may retry a non-ambiguous failure
+under the normal stored resume budget; an ambiguous attempt is never retried.
 
 ### Unknown run
 
@@ -623,8 +691,10 @@ intentionally written to the database.
 Model changes create a new provider lock. Before changing a pinned model:
 
 1. List and export important partial runs.
-2. Finish them under the old configuration or retain an isolated copy of the
-   old release and config for recovery.
+2. Preserve the run database and retain an isolated compatible release if a
+   later protocol or provider-validation change could prevent recovery. The
+   stored run supplies its old provider lock; a valid config or `--data-dir`
+   only locates that database.
 3. Review the provider's migration notes and pricing.
 4. Change the model in version-controlled configuration.
 5. Run tests, mock mode, `doctor`, `providers`, and a live smoke run.
@@ -635,13 +705,13 @@ Protocol code changes alter the immutable protocol hash and intentionally block
 old-run resume. Treat them as release changes, not live edits.
 
 `1.2.0-beta` introduced the 1,000-character jury rationale bound and optional
-jury repair. `1.2.1-beta` retains those behaviors and clarifies that requested
-deliverable counts do not determine proposal array lengths; the evidence target
-remains three and its hard maximum remains four. Protocol changes apply only to
-newly created runs and do not revalidate, repair, or recompute earlier records.
-Preserve the matching older installation for unfinished earlier runs, export
-important completed records before rollout, and use a fresh idempotency key for
-a new `1.2.1-beta` run.
+jury repair. `1.2.1-beta` clarified that requested deliverable counts do not
+determine proposal array lengths. `1.2.2-beta` adds narrower provider-generation
+targets while retaining the larger canonical local proposal bounds. Protocol
+changes apply only to newly created runs and do not revalidate, repair, or
+recompute earlier records. Preserve the matching older installation for
+unfinished earlier runs, export important completed records before rollout,
+and use a fresh idempotency key for a new `1.2.2-beta` run.
 
 ## Retention and deletion
 

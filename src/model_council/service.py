@@ -560,6 +560,7 @@ class CouncilApplication:
             providers=self._providers,
             policy=self.config.policy,
             synthesis_provider=self.config.synthesis_provider,
+            synthesis_fallbacks=self.config.synthesis_fallbacks,
             call_gate=DurableCallGate(
                 store=self.service_store,
                 principal=principal,
@@ -1129,6 +1130,8 @@ def _validate_mock_only(config: AppConfig) -> None:
             raise ValueError(
                 "council service is mock-only and refuses live providers"
             )
+    if len(config.synthesis_providers) != 1:
+        raise ValueError("council service requires exactly one synthesizer")
     if not config.synthesis_provider.startswith("mock"):
         raise ValueError("council service synthesis provider must be a mock")
 

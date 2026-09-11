@@ -22,7 +22,7 @@ council --mock --data-dir ./work/governance-proof run \
 
 | Field | Recorded value |
 |---|---|
-| Protocol | `independent-jury@1.2.1-beta` |
+| Protocol | `independent-jury@1.2.2-beta` |
 | Completion | `completed`, quality `clean` |
 | Membership | 4 requested, 4 proposals, 4 valid juries |
 | Aggregate | Borda scores, ranking, winner or tie, consensus, and disagreement |
