@@ -8,6 +8,7 @@ import tempfile
 import threading
 import time
 import unittest
+from unittest.mock import patch
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -301,6 +302,168 @@ class TrackedProvider(FakeProvider):
             self.tracker.leave()
 
 
+class ManualClock:
+    def __init__(self, initial: float = 0.0) -> None:
+        self.value = initial
+        self.lock = threading.Lock()
+
+    def monotonic(self) -> float:
+        with self.lock:
+            return self.value
+
+    def advance_to(self, value: float) -> None:
+        with self.lock:
+            self.value = max(self.value, value)
+
+
+class _TestCallLease:
+    def reconcile(self, actual_units: int) -> None:
+        return
+
+    def release(self) -> None:
+        return
+
+
+class RepairDeadlineGate:
+    def __init__(self, clock: ManualClock, deadline: float) -> None:
+        self.clock = clock
+        self.deadline = deadline
+        self.advanced = False
+        self.repair_attempts: list[int] = []
+
+    def reserve(
+        self,
+        *,
+        stage: str,
+        attempt: int,
+        **_kwargs: object,
+    ) -> _TestCallLease:
+        if stage == "jury_repair":
+            self.repair_attempts.append(attempt)
+            if not self.advanced:
+                self.clock.advance_to(self.deadline)
+                self.advanced = True
+        return _TestCallLease()
+
+
+class OneShotDenyGate:
+    def __init__(self, stage: str, provider: str) -> None:
+        self.stage = stage
+        self.provider = provider
+        self.denied = False
+        self.attempts: list[tuple[str, str, int]] = []
+
+    def reserve(
+        self,
+        *,
+        stage: str,
+        provider: ProviderConfig,
+        attempt: int,
+        **_kwargs: object,
+    ) -> _TestCallLease:
+        self.attempts.append((stage, provider.name, attempt))
+        if (
+            stage == self.stage
+            and provider.name == self.provider
+            and not self.denied
+        ):
+            self.denied = True
+            raise ProviderError(
+                "synthetic service gate denial before provider dispatch",
+                category=ErrorCategory.BUDGET,
+                retryable=False,
+                request_id="synthetic-gate-denial",
+                ambiguous=False,
+            )
+        return _TestCallLease()
+
+
+class DeadlineAdvancingProvider(FakeProvider):
+    def __init__(self, name: str, clock: ManualClock, value: float) -> None:
+        super().__init__(name)
+        self.clock = clock
+        self.value = value
+
+    def generate(
+        self,
+        *,
+        system_prompt: str,
+        user_prompt: str,
+        stage: str,
+        max_output_tokens: int | None = None,
+        timeout_seconds: float | None = None,
+    ) -> ProviderResponse:
+        response = super().generate(
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            stage=stage,
+            max_output_tokens=max_output_tokens,
+            timeout_seconds=timeout_seconds,
+        )
+        self.clock.advance_to(self.value)
+        return response
+
+
+class StageDelayProvider(FakeProvider):
+    def __init__(self, name: str, proposal_delay: float) -> None:
+        super().__init__(name)
+        self.proposal_delay = proposal_delay
+
+    def generate(
+        self,
+        *,
+        system_prompt: str,
+        user_prompt: str,
+        stage: str,
+        max_output_tokens: int | None = None,
+        timeout_seconds: float | None = None,
+    ) -> ProviderResponse:
+        if stage == "proposal":
+            time.sleep(self.proposal_delay)
+        return super().generate(
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            stage=stage,
+            max_output_tokens=max_output_tokens,
+            timeout_seconds=timeout_seconds,
+        )
+
+
+class AmbiguousSynthesisProvider(FakeProvider):
+    def generate(
+        self,
+        *,
+        system_prompt: str,
+        user_prompt: str,
+        stage: str,
+        max_output_tokens: int | None = None,
+        timeout_seconds: float | None = None,
+    ) -> ProviderResponse:
+        if stage != "synthesis":
+            return super().generate(
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                stage=stage,
+                max_output_tokens=max_output_tokens,
+                timeout_seconds=timeout_seconds,
+            )
+        self.calls.append(stage)
+        self.call_limits.append(
+            {
+                "stage": stage,
+                "max_output_tokens": max_output_tokens,
+                "timeout_seconds": timeout_seconds,
+            }
+        )
+        raise ProviderError(
+            "synthetic ambiguous synthesis timeout",
+            category=ErrorCategory.TIMEOUT,
+            retryable=True,
+            request_id="ambiguous-synthesis-request",
+            ambiguous=True,
+        )
+
+
 class CouncilEngineTests(unittest.TestCase):
     def _engine(
         self,
@@ -331,6 +494,568 @@ class CouncilEngineTests(unittest.TestCase):
             synthesis_provider="alpha",
         )
         return engine, providers, store
+
+    def _ordered_engine(
+        self,
+        directory: Path,
+        *,
+        synthesis_failures: set[str] | None = None,
+        max_calls: int = 9,
+    ) -> tuple[CouncilEngine, dict[str, FakeProvider], CouncilStore]:
+        synthesis_failures = synthesis_failures or set()
+        providers = {
+            name: FakeProvider(
+                name,
+                fail_stages=(
+                    {"synthesis"}
+                    if name in synthesis_failures
+                    else set()
+                ),
+            )
+            for name in ("alpha", "beta", "gamma")
+        }
+        store = CouncilStore(directory)
+        engine = CouncilEngine(
+            store=store,
+            providers=providers,
+            policy=RunPolicy(
+                proposal_quorum=2,
+                jury_quorum=2,
+                min_lineages=2,
+                max_calls=max_calls,
+                deadline_seconds=30,
+            ),
+            synthesis_provider="alpha",
+            synthesis_fallbacks=("beta", "gamma"),
+        )
+        return engine, providers, store
+
+    def test_ordered_synthesis_primary_success_stops_chain(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            engine, providers, store = self._ordered_engine(
+                Path(temporary)
+            )
+
+            result = engine.run("Use the first successful synthesizer.")
+
+            self.assertEqual(result["status"], "completed")
+            self.assertEqual(result["completion_quality"], "clean")
+            self.assertEqual(store.count_calls(result["run_id"]), 7)
+            self.assertEqual(
+                result["synthesis"],
+                {
+                    "configured_order": ["alpha", "beta", "gamma"],
+                    "selected_provider": "alpha",
+                    "selected_position": 1,
+                    "attempts": [
+                        {
+                            "position": 1,
+                            "provider": "alpha",
+                            "status": "succeeded",
+                            "invocation_id": result["synthesis"]["attempts"][0][
+                                "invocation_id"
+                            ],
+                            "resolved_model": "alpha-model-1",
+                            "call_count": 1,
+                        },
+                        {
+                            "position": 2,
+                            "provider": "beta",
+                            "status": "not_attempted",
+                        },
+                        {
+                            "position": 3,
+                            "provider": "gamma",
+                            "status": "not_attempted",
+                        },
+                    ],
+                },
+            )
+            self.assertEqual(
+                [providers[name].calls.count("synthesis") for name in providers],
+                [1, 0, 0],
+            )
+            self.assertFalse(
+                any(
+                    event["event_type"] == "synthesis_fallback_advanced"
+                    for event in store.list_events(result["run_id"])
+                )
+            )
+
+    def test_ordered_synthesis_uses_first_successful_fallback(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            engine, providers, store = self._ordered_engine(
+                Path(temporary),
+                synthesis_failures={"alpha"},
+            )
+
+            result = engine.run("Advance explicitly after synthesis failure.")
+
+            self.assertEqual(result["status"], "completed")
+            self.assertEqual(result["completion_quality"], "degraded")
+            self.assertEqual(store.count_calls(result["run_id"]), 8)
+            self.assertEqual(
+                (
+                    result["synthesis"]["selected_provider"],
+                    result["synthesis"]["selected_position"],
+                ),
+                ("beta", 2),
+            )
+            self.assertEqual(
+                [
+                    attempt["status"]
+                    for attempt in result["synthesis"]["attempts"]
+                ],
+                ["failed", "succeeded", "not_attempted"],
+            )
+            self.assertEqual(
+                result["synthesis"]["attempts"][0]["category"],
+                ErrorCategory.PROVIDER_SERVER.value,
+            )
+            self.assertFalse(
+                result["synthesis"]["attempts"][0]["ambiguous"]
+            )
+            self.assertEqual(
+                [providers[name].calls.count("synthesis") for name in providers],
+                [1, 1, 0],
+            )
+            fallback_events = [
+                event["payload"]
+                for event in store.list_events(result["run_id"])
+                if event["event_type"] == "synthesis_fallback_advanced"
+            ]
+            synthesis_failure = next(
+                failure
+                for failure in result["failures"]
+                if failure["stage"] == "synthesis"
+                and failure["provider"] == "alpha"
+            )
+            self.assertEqual(
+                fallback_events,
+                [
+                    {
+                        "version": 1,
+                        "from_position": 1,
+                        "from_provider": "alpha",
+                        "to_position": 2,
+                        "to_provider": "beta",
+                        "reason_category": (
+                            ErrorCategory.PROVIDER_SERVER.value
+                        ),
+                        "ambiguous": False,
+                        "failure": {
+                            key: value
+                            for key, value in synthesis_failure.items()
+                            if key not in {"stage", "provider"}
+                        },
+                    }
+                ],
+            )
+            self.assertTrue(
+                any("fallback provider beta" in item for item in result["warnings"])
+            )
+
+    def test_ordered_synthesis_all_fail_preserves_attempts(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            engine, providers, store = self._ordered_engine(
+                Path(temporary),
+                synthesis_failures={"alpha", "beta", "gamma"},
+            )
+
+            result = engine.run("Preserve every failed synthesis attempt.")
+
+            self.assertEqual(result["status"], "partial")
+            self.assertIsNone(result["answer"])
+            self.assertIsNone(result["synthesis"]["selected_provider"])
+            self.assertIsNone(result["synthesis"]["selected_position"])
+            self.assertEqual(
+                [
+                    attempt["status"]
+                    for attempt in result["synthesis"]["attempts"]
+                ],
+                ["failed", "failed", "failed"],
+            )
+            self.assertEqual(
+                [providers[name].calls.count("synthesis") for name in providers],
+                [1, 1, 1],
+            )
+            self.assertEqual(store.count_calls(result["run_id"]), 9)
+            self.assertEqual(
+                len(
+                    [
+                        failure
+                        for failure in result["failures"]
+                        if failure["stage"] == "synthesis"
+                    ]
+                ),
+                3,
+            )
+            fallback_events = [
+                event["payload"]
+                for event in store.list_events(result["run_id"])
+                if event["event_type"] == "synthesis_fallback_advanced"
+            ]
+            self.assertEqual(
+                [
+                    (event["from_provider"], event["to_provider"])
+                    for event in fallback_events
+                ],
+                [("alpha", "beta"), ("beta", "gamma")],
+            )
+            self.assertTrue(
+                any(
+                    "raw council record preserved" in warning
+                    for warning in result["warnings"]
+                )
+            )
+
+            calls_before_resume = {
+                name: list(provider.calls)
+                for name, provider in providers.items()
+            }
+            fallback_events_before = [
+                event["payload"]
+                for event in store.list_events(result["run_id"])
+                if event["event_type"] == "synthesis_fallback_advanced"
+            ]
+
+            resumed = engine.resume(result["run_id"])
+
+            self.assertEqual(resumed["failures"], result["failures"])
+            self.assertEqual(resumed["synthesis"], result["synthesis"])
+            self.assertEqual(
+                {
+                    name: provider.calls
+                    for name, provider in providers.items()
+                },
+                calls_before_resume,
+            )
+            self.assertEqual(
+                [
+                    event["payload"]
+                    for event in store.list_events(result["run_id"])
+                    if event["event_type"]
+                    == "synthesis_fallback_advanced"
+                ],
+                fallback_events_before,
+            )
+
+    def test_ambiguous_terminal_synthesis_failure_is_stable_on_resume(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            providers: dict[str, FakeProvider] = {
+                "alpha": AmbiguousSynthesisProvider("alpha"),
+                "beta": FakeProvider("beta"),
+                "gamma": FakeProvider("gamma"),
+            }
+            store = CouncilStore(Path(temporary))
+            engine = CouncilEngine(
+                store=store,
+                providers=providers,
+                policy=RunPolicy(
+                    proposal_quorum=2,
+                    jury_quorum=2,
+                    min_lineages=2,
+                    max_calls=7,
+                    deadline_seconds=30,
+                ),
+                synthesis_provider="alpha",
+            )
+
+            first = engine.run("Preserve an ambiguous synthesis failure.")
+            first_failure = next(
+                failure
+                for failure in first["failures"]
+                if failure["stage"] == "synthesis"
+            )
+            calls_before_resume = list(providers["alpha"].calls)
+
+            resumed = engine.resume(first["run_id"])
+            resumed_failure = next(
+                failure
+                for failure in resumed["failures"]
+                if failure["stage"] == "synthesis"
+            )
+
+            self.assertEqual(first["status"], "partial")
+            self.assertEqual(resumed["status"], "partial")
+            self.assertEqual(resumed_failure, first_failure)
+            self.assertEqual(
+                resumed["synthesis"]["attempts"][0]["category"],
+                ErrorCategory.TIMEOUT.value,
+            )
+            self.assertEqual(providers["alpha"].calls, calls_before_resume)
+
+    def test_undispatched_synthesis_retry_restores_prior_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            engine, providers, store = self._engine(Path(temporary))
+            providers["alpha"].fail_stages.add("synthesis")
+            first = engine.run(
+                "Preserve a synthesis failure when its retry is denied."
+            )
+            first_failure = next(
+                failure
+                for failure in first["failures"]
+                if failure["stage"] == "synthesis"
+            )
+            prior_invocation = next(
+                invocation
+                for invocation in store.list_invocations(first["run_id"])
+                if invocation["stage"] == "synthesis"
+            )
+            providers["alpha"].fail_stages.remove("synthesis")
+            gate = OneShotDenyGate("synthesis", "alpha")
+            engine.call_gate = gate
+
+            denied = engine.resume(first["run_id"])
+
+            denied_failure = next(
+                failure
+                for failure in denied["failures"]
+                if failure["stage"] == "synthesis"
+            )
+            restored_invocation = next(
+                invocation
+                for invocation in store.list_invocations(first["run_id"])
+                if invocation["stage"] == "synthesis"
+            )
+            self.assertEqual(denied["status"], "partial")
+            self.assertEqual(denied_failure, first_failure)
+            self.assertEqual(restored_invocation, prior_invocation)
+            self.assertEqual(providers["alpha"].calls.count("synthesis"), 1)
+            self.assertFalse(
+                any(
+                    event["event_type"] == "provider_retry_started"
+                    for event in store.list_events(first["run_id"])
+                )
+            )
+            undispatched = [
+                event["payload"]
+                for event in store.list_events(first["run_id"])
+                if event["event_type"] == "provider_call_not_dispatched"
+            ]
+            self.assertEqual(len(undispatched), 1)
+            self.assertEqual(undispatched[0]["reservation_attempt"], 2)
+            self.assertEqual(
+                undispatched[0]["prior_failure"],
+                {
+                    key: value
+                    for key, value in first_failure.items()
+                    if key not in {"stage", "provider"}
+                },
+            )
+
+            recovered = engine.resume(first["run_id"])
+
+            self.assertEqual(recovered["status"], "completed")
+            self.assertEqual(providers["alpha"].calls.count("synthesis"), 2)
+            self.assertEqual(
+                [
+                    attempt
+                    for stage, provider, attempt in gate.attempts
+                    if stage == "synthesis" and provider == "alpha"
+                ],
+                [2, 3],
+            )
+            final_invocation = next(
+                invocation
+                for invocation in store.list_invocations(first["run_id"])
+                if invocation["stage"] == "synthesis"
+            )
+            self.assertEqual(final_invocation["call_count"], 2)
+            retry_events = [
+                event["payload"]
+                for event in store.list_events(first["run_id"])
+                if event["event_type"] == "provider_retry_started"
+            ]
+            self.assertEqual(
+                [event["retry_call_count"] for event in retry_events],
+                [2],
+            )
+
+    def test_resume_preserves_no_dispatch_fallback_result_order(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            providers: dict[str, FakeProvider] = {
+                "alpha": StageDelayProvider("alpha", 0.03),
+                "beta": FakeProvider("beta"),
+                "gamma": FakeProvider(
+                    "gamma", fail_stages={"proposal"}
+                ),
+            }
+            store = CouncilStore(Path(temporary))
+            gate = OneShotDenyGate("synthesis", "alpha")
+            engine = CouncilEngine(
+                store=store,
+                providers=providers,
+                policy=RunPolicy(
+                    proposal_quorum=2,
+                    jury_quorum=2,
+                    min_lineages=2,
+                    max_calls=8,
+                    deadline_seconds=30,
+                ),
+                synthesis_provider="alpha",
+                synthesis_fallbacks=("beta",),
+                call_gate=gate,
+            )
+            run_id = engine.create_run(
+                "Keep result ordering stable after interrupted finish."
+            )
+            captured: list[dict[str, object]] = []
+
+            def crash_finish(
+                _run_id: str, result: dict[str, object]
+            ) -> dict[str, object]:
+                captured.append(result)
+                raise RuntimeError("synthetic interrupted finish")
+
+            with patch.object(engine, "_finish", side_effect=crash_finish):
+                with self.assertRaisesRegex(RuntimeError, "interrupted finish"):
+                    engine.resume(run_id)
+
+            self.assertEqual(len(captured), 1)
+            first_result = captured[0]
+            self.assertEqual(
+                [proposal["provider"] for proposal in first_result["proposals"]],
+                ["alpha", "beta"],
+            )
+            self.assertEqual(
+                [failure["stage"] for failure in first_result["failures"]],
+                ["proposal", "synthesis"],
+            )
+            fallback_event = next(
+                event["payload"]
+                for event in store.list_events(run_id)
+                if event["event_type"] == "synthesis_fallback_advanced"
+            )
+            first_synthesis_failure = first_result["failures"][1]
+            self.assertEqual(
+                fallback_event["failure"],
+                {
+                    key: value
+                    for key, value in first_synthesis_failure.items()
+                    if key not in {"stage", "provider"}
+                },
+            )
+            self.assertFalse(
+                any(
+                    invocation["stage"] == "synthesis"
+                    and invocation["provider"] == "alpha"
+                    for invocation in store.list_invocations(run_id)
+                )
+            )
+
+            resumed = engine.resume(run_id)
+
+            self.assertEqual(resumed, first_result)
+            self.assertEqual(
+                [failure["stage"] for failure in resumed["failures"]],
+                ["proposal", "synthesis"],
+            )
+            self.assertEqual(
+                [proposal["provider"] for proposal in resumed["proposals"]],
+                ["alpha", "beta"],
+            )
+
+    def test_resume_reuses_persisted_fallback_and_event(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            engine, providers, store = self._ordered_engine(
+                Path(temporary),
+                synthesis_failures={"alpha"},
+            )
+            run_id = engine.create_run("Resume after fallback synthesis.")
+
+            with patch.object(
+                engine,
+                "_finish",
+                side_effect=RuntimeError("synthetic post-synthesis crash"),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "post-synthesis"):
+                    engine.resume(run_id)
+            calls_before_resume = {
+                name: list(provider.calls)
+                for name, provider in providers.items()
+            }
+            fallback_events_before = [
+                event["payload"]
+                for event in store.list_events(run_id)
+                if event["event_type"] == "synthesis_fallback_advanced"
+            ]
+
+            result = engine.resume(run_id)
+
+            self.assertEqual(result["status"], "completed")
+            self.assertEqual(
+                result["synthesis"]["selected_provider"],
+                "beta",
+            )
+            self.assertEqual(
+                {
+                    name: provider.calls for name, provider in providers.items()
+                },
+                calls_before_resume,
+            )
+            fallback_events_after = [
+                event["payload"]
+                for event in store.list_events(run_id)
+                if event["event_type"] == "synthesis_fallback_advanced"
+            ]
+            self.assertEqual(fallback_events_after, fallback_events_before)
+            self.assertEqual(len(fallback_events_after), 1)
+            self.assertEqual(
+                {
+                    invocation["provider"]: invocation["call_count"]
+                    for invocation in store.list_invocations(run_id)
+                    if invocation["stage"] == "synthesis"
+                },
+                {"alpha": 1, "beta": 1},
+            )
+
+    def test_resume_advances_after_crash_before_fallback_event(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            engine, providers, store = self._ordered_engine(
+                Path(temporary),
+                synthesis_failures={"alpha"},
+            )
+            run_id = engine.create_run(
+                "Advance after a persisted failure without a transition."
+            )
+
+            with patch.object(
+                engine,
+                "_persist_synthesis_fallback_event",
+                side_effect=RuntimeError("synthetic pre-transition crash"),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "pre-transition"):
+                    engine.resume(run_id)
+
+            self.assertEqual(providers["alpha"].calls.count("synthesis"), 1)
+            self.assertFalse(
+                any(
+                    event["event_type"] == "synthesis_fallback_advanced"
+                    for event in store.list_events(run_id)
+                )
+            )
+
+            result = engine.resume(run_id)
+
+            self.assertEqual(result["status"], "completed")
+            self.assertEqual(
+                result["synthesis"]["selected_provider"],
+                "beta",
+            )
+            self.assertEqual(providers["alpha"].calls.count("synthesis"), 1)
+            self.assertEqual(providers["beta"].calls.count("synthesis"), 1)
+            fallback = next(
+                event["payload"]
+                for event in store.list_events(run_id)
+                if event["event_type"] == "synthesis_fallback_advanced"
+            )
+            self.assertEqual(
+                fallback["reason_category"],
+                ErrorCategory.PROVIDER_SERVER.value,
+            )
 
     def test_complete_run_and_resume_are_durable(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -637,6 +1362,80 @@ class CouncilEngineTests(unittest.TestCase):
             self.assertEqual(store.count_calls(run_id), 1)
             self.assertEqual(providers["alpha"].calls.count("jury"), 1)
 
+    def test_post_reservation_deadline_releases_repair_for_resume(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            clock = ManualClock()
+            providers: dict[str, FakeProvider] = {
+                "alpha": OversizedJuryProvider("alpha"),
+                "beta": FakeProvider("beta"),
+                "gamma": FakeProvider("gamma"),
+            }
+            store = CouncilStore(Path(temporary))
+            gate = RepairDeadlineGate(clock, 30.0)
+            engine = CouncilEngine(
+                store=store,
+                providers=providers,
+                policy=RunPolicy(
+                    proposal_quorum=2,
+                    jury_quorum=3,
+                    min_lineages=2,
+                    max_calls=8,
+                    deadline_seconds=30,
+                    jury_repair_attempts=1,
+                ),
+                synthesis_provider="alpha",
+                call_gate=gate,
+            )
+
+            with patch(
+                "model_council.engine.time.monotonic",
+                side_effect=clock.monotonic,
+            ):
+                first = engine.run(
+                    "Resume a repair blocked after its call reservation."
+                )
+                repair_audit = [
+                    event
+                    for event in store.list_events(first["run_id"])
+                    if event["event_type"]
+                    == "provider_call_not_dispatched"
+                ]
+
+                self.assertEqual(first["status"], "partial")
+                self.assertEqual(store.count_calls(first["run_id"]), 6)
+                self.assertEqual(
+                    [
+                        invocation
+                        for invocation in store.list_invocations(
+                            first["run_id"]
+                        )
+                        if invocation["stage"] == "jury_repair"
+                    ],
+                    [],
+                )
+                self.assertEqual(len(repair_audit), 1)
+                self.assertEqual(
+                    repair_audit[0]["payload"]["error"]["category"],
+                    ErrorCategory.TIMEOUT.value,
+                )
+                self.assertEqual(providers["alpha"].calls.count("jury"), 1)
+
+                resumed = engine.resume(first["run_id"])
+
+            self.assertEqual(resumed["status"], "completed")
+            self.assertEqual(store.count_calls(first["run_id"]), 8)
+            self.assertEqual(providers["alpha"].calls.count("jury"), 2)
+            self.assertEqual(gate.repair_attempts, [1, 2])
+            repair_invocation = next(
+                invocation
+                for invocation in store.list_invocations(first["run_id"])
+                if invocation["stage"] == "jury_repair"
+            )
+            self.assertEqual(repair_invocation["status"], "succeeded")
+            self.assertEqual(repair_invocation["call_count"], 1)
+
     def test_jury_repair_that_changes_vote_is_rejected_and_not_retried(
         self,
     ) -> None:
@@ -822,6 +1621,243 @@ class CouncilEngineTests(unittest.TestCase):
             self.assertEqual(repair["status"], "not_attempted")
             self.assertEqual(
                 repair["reason"], "call budget reserved for synthesis"
+            )
+
+    def test_truncation_recovery_reserves_final_call_for_synthesis(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            providers = {
+                name: FakeProvider(
+                    name,
+                    truncate_once_stages=(
+                        {"jury"} if name == "beta" else set()
+                    ),
+                )
+                for name in ("alpha", "beta", "gamma")
+            }
+            store = CouncilStore(Path(temporary))
+            engine = CouncilEngine(
+                store=store,
+                providers=providers,
+                policy=RunPolicy(
+                    proposal_quorum=2,
+                    jury_quorum=2,
+                    min_lineages=2,
+                    max_calls=7,
+                    deadline_seconds=30,
+                ),
+                synthesis_provider="alpha",
+            )
+
+            result = engine.run("Keep the final call for synthesis.")
+
+            self.assertEqual(result["status"], "completed")
+            self.assertEqual(result["completion_quality"], "degraded")
+            self.assertEqual(store.count_calls(result["run_id"]), 7)
+            self.assertEqual(providers["beta"].calls.count("jury"), 1)
+            self.assertEqual(providers["alpha"].calls.count("synthesis"), 1)
+            recovery = next(
+                item
+                for item in result["recoveries"]
+                if item.get("stage") == "jury"
+                and item.get("provider") == "beta"
+            )
+            self.assertEqual(recovery["status"], "not_attempted")
+            self.assertEqual(
+                recovery["reason"],
+                "call budget reserved for synthesis",
+            )
+            self.assertTrue(recovery["final_failure_recorded"])
+            self.assertEqual(
+                [
+                    event
+                    for event in store.list_events(result["run_id"])
+                    if event["event_type"] == "provider_retry_started"
+                    and event["payload"]["stage"] == "jury"
+                    and event["payload"]["provider"] == "beta"
+                ],
+                [],
+            )
+
+    def test_proposal_recovery_reserves_jury_calls_and_synthesis(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            providers = {
+                name: FakeProvider(
+                    name,
+                    truncate_once_stages=(
+                        {"proposal"} if name == "beta" else set()
+                    ),
+                )
+                for name in ("alpha", "beta", "gamma")
+            }
+            store = CouncilStore(Path(temporary))
+            engine = CouncilEngine(
+                store=store,
+                providers=providers,
+                policy=RunPolicy(
+                    proposal_quorum=2,
+                    jury_quorum=3,
+                    min_lineages=2,
+                    max_calls=7,
+                    deadline_seconds=30,
+                ),
+                synthesis_provider="alpha",
+            )
+
+            result = engine.run("Reserve every mandatory downstream call.")
+
+            self.assertEqual(result["status"], "completed")
+            self.assertEqual(result["membership"]["valid_juries"], 3)
+            self.assertEqual(store.count_calls(result["run_id"]), 7)
+            self.assertEqual(providers["beta"].calls.count("proposal"), 1)
+            self.assertEqual(providers["alpha"].calls.count("synthesis"), 1)
+            recovery = next(
+                item
+                for item in result["recoveries"]
+                if item.get("stage") == "proposal"
+                and item.get("provider") == "beta"
+            )
+            self.assertEqual(recovery["status"], "not_attempted")
+            self.assertEqual(
+                recovery["reason"],
+                "call budget reserved for jury calls and synthesis",
+            )
+
+    def test_ordered_synthesis_reserves_fallback_before_length_recovery(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            engine, providers, store = self._ordered_engine(
+                Path(temporary),
+                max_calls=9,
+            )
+            providers["alpha"].truncate_once_stages.add("synthesis")
+
+            result = engine.run("Keep the next synthesis slot available.")
+
+            self.assertEqual(result["status"], "completed")
+            self.assertEqual(
+                result["synthesis"]["selected_provider"],
+                "beta",
+            )
+            self.assertEqual(store.count_calls(result["run_id"]), 8)
+            self.assertEqual(
+                [providers[name].calls.count("synthesis") for name in providers],
+                [1, 1, 0],
+            )
+            recovery = next(
+                item
+                for item in result["recoveries"]
+                if item.get("stage") == "synthesis"
+                and item.get("provider") == "alpha"
+            )
+            self.assertEqual(recovery["status"], "not_attempted")
+            self.assertEqual(
+                recovery["reason"],
+                "call budget reserved for synthesis",
+            )
+            self.assertEqual(
+                [
+                    event
+                    for event in store.list_events(result["run_id"])
+                    if event["event_type"] == "provider_retry_started"
+                    and event["payload"]["stage"] == "synthesis"
+                ],
+                [],
+            )
+
+    def test_default_budget_limits_proposal_recovery_to_reported_capacity(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            names = (
+                "alpha",
+                "beta",
+                "gamma",
+                "delta",
+                "epsilon",
+                "zeta",
+                "eta",
+            )
+            providers = {
+                name: FakeProvider(
+                    name,
+                    fail_stages=(
+                        {"synthesis"}
+                        if name in {"alpha", "beta"}
+                        else set()
+                    ),
+                    truncate_once_stages={"proposal"},
+                )
+                for name in names
+            }
+            store = CouncilStore(Path(temporary))
+            engine = CouncilEngine(
+                store=store,
+                providers=providers,
+                policy=RunPolicy(
+                    proposal_quorum=3,
+                    jury_quorum=3,
+                    min_lineages=3,
+                    max_calls=20,
+                    deadline_seconds=30,
+                ),
+                synthesis_provider="alpha",
+                synthesis_fallbacks=("beta", "gamma"),
+            )
+
+            result = engine.run(
+                "Allow only the three reported proposal recovery calls."
+            )
+
+            self.assertEqual(result["status"], "completed")
+            self.assertEqual(
+                result["synthesis"]["selected_provider"],
+                "gamma",
+            )
+            self.assertEqual(store.count_calls(result["run_id"]), 20)
+            self.assertEqual(
+                result["workload"]["preflight"]["mandatory_calls"],
+                17,
+            )
+            self.assertEqual(
+                result["workload"]["preflight"]["recovery_call_capacity"],
+                3,
+            )
+            self.assertEqual(
+                [providers[name].calls.count("proposal") for name in names],
+                [2, 2, 2, 1, 1, 1, 1],
+            )
+            self.assertTrue(
+                all(provider.calls.count("jury") == 1 for provider in providers.values())
+            )
+            self.assertEqual(
+                [providers[name].calls.count("synthesis") for name in names],
+                [1, 1, 1, 0, 0, 0, 0],
+            )
+            proposal_recoveries = [
+                recovery
+                for recovery in result["recoveries"]
+                if recovery.get("stage") == "proposal"
+            ]
+            self.assertEqual(
+                sum(
+                    recovery["status"] == "recovered"
+                    for recovery in proposal_recoveries
+                ),
+                3,
+            )
+            self.assertEqual(
+                sum(
+                    recovery["status"] == "not_attempted"
+                    and recovery["reason"]
+                    == "call budget reserved for jury calls and synthesis"
+                    for recovery in proposal_recoveries
+                ),
+                4,
             )
 
     def test_candidate_namespace_is_stable_across_juries(self) -> None:
@@ -1207,6 +2243,89 @@ class CouncilEngineTests(unittest.TestCase):
             self.assertEqual(tracker.maximum, 2)
             self.assertEqual(tracker.active, 0)
 
+    def test_queued_provider_calls_recheck_deadline_before_dispatch(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            clock = ManualClock()
+            providers: dict[str, FakeProvider] = {
+                "alpha": DeadlineAdvancingProvider(
+                    "alpha",
+                    clock,
+                    10.0,
+                ),
+                "beta": FakeProvider("beta"),
+                "gamma": FakeProvider("gamma"),
+            }
+            store = CouncilStore(Path(temporary))
+            engine = CouncilEngine(
+                store=store,
+                providers=providers,
+                policy=RunPolicy(
+                    proposal_quorum=2,
+                    jury_quorum=2,
+                    min_lineages=2,
+                    max_calls=7,
+                    max_parallel_calls=1,
+                    deadline_seconds=30,
+                ),
+                synthesis_provider="alpha",
+            )
+            question = "Do not dispatch queued calls after the deadline."
+            run_id = engine.create_run(question)
+            prompts = {
+                name: proposal_prompts(question) for name in providers
+            }
+
+            with patch("model_council.engine.time", clock):
+                successes, failures, recoveries = (
+                    engine._run_parallel_stage(
+                        run_id=run_id,
+                        stage="proposal",
+                        prompts=prompts,
+                        deadline=5.0,
+                    )
+                )
+
+                self.assertEqual(set(successes), {"alpha"})
+                self.assertEqual(recoveries, [])
+                self.assertEqual(
+                    {failure["provider"] for failure in failures},
+                    {"beta", "gamma"},
+                )
+                self.assertTrue(
+                    all(
+                        failure["category"]
+                        == ErrorCategory.TIMEOUT.value
+                        and not failure["ambiguous"]
+                        for failure in failures
+                    )
+                )
+                self.assertEqual(providers["beta"].calls, [])
+                self.assertEqual(providers["gamma"].calls, [])
+                self.assertEqual(
+                    {
+                        invocation["provider"]
+                        for invocation in store.list_invocations(run_id)
+                    },
+                    {"alpha"},
+                )
+
+                resumed_successes, resumed_failures, _ = (
+                    engine._run_parallel_stage(
+                        run_id=run_id,
+                        stage="proposal",
+                        prompts=prompts,
+                        deadline=15.0,
+                    )
+                )
+
+            self.assertEqual(set(resumed_successes), set(providers))
+            self.assertEqual(resumed_failures, [])
+            self.assertEqual(providers["beta"].calls, ["proposal"])
+            self.assertEqual(providers["gamma"].calls, ["proposal"])
+            self.assertEqual(store.count_calls(run_id), 3)
+
     def test_partial_jury_run_exposes_and_validates_namespace_lock(
         self,
     ) -> None:
@@ -1518,6 +2637,103 @@ class CouncilEngineTests(unittest.TestCase):
                 1,
             )
 
+    def test_deadline_before_truncation_retry_does_not_consume_it(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            clock = ManualClock()
+            alpha = DeadlineAdvancingProvider("alpha", clock, 5.0)
+            alpha.truncate_once_stages.add("proposal")
+            providers: dict[str, FakeProvider] = {
+                "alpha": alpha,
+                "beta": FakeProvider("beta"),
+                "gamma": FakeProvider("gamma"),
+            }
+            store = CouncilStore(Path(temporary))
+            engine = CouncilEngine(
+                store=store,
+                providers=providers,
+                policy=RunPolicy(
+                    proposal_quorum=2,
+                    jury_quorum=2,
+                    min_lineages=2,
+                    max_calls=7,
+                    deadline_seconds=30,
+                ),
+                synthesis_provider="alpha",
+            )
+            question = "Retry a truncated response only after dispatch opens."
+            run_id = engine.create_run(question)
+            prompts = {"alpha": proposal_prompts(question)}
+
+            with patch(
+                "model_council.engine.time.monotonic",
+                side_effect=clock.monotonic,
+            ):
+                first_successes, first_failures, first_recoveries = (
+                    engine._run_parallel_stage(
+                        run_id=run_id,
+                        stage="proposal",
+                        prompts=prompts,
+                        deadline=5.0,
+                    )
+                )
+
+                self.assertEqual(first_successes, {})
+                self.assertEqual(len(first_failures), 1)
+                self.assertTrue(
+                    first_failures[0]["message"].endswith(
+                        "(finish_reason=length)"
+                    )
+                )
+                self.assertEqual(
+                    [recovery["status"] for recovery in first_recoveries],
+                    ["not_dispatched"],
+                )
+                self.assertEqual(alpha.calls.count("proposal"), 1)
+                self.assertEqual(store.count_calls(run_id), 1)
+                self.assertFalse(
+                    any(
+                        event["event_type"] == "provider_retry_started"
+                        for event in store.list_events(run_id)
+                    )
+                )
+
+                resumed_successes, resumed_failures, _ = (
+                    engine._run_parallel_stage(
+                        run_id=run_id,
+                        stage="proposal",
+                        prompts=prompts,
+                        deadline=15.0,
+                    )
+                )
+
+            self.assertEqual(set(resumed_successes), {"alpha"})
+            self.assertEqual(resumed_failures, [])
+            self.assertEqual(alpha.calls.count("proposal"), 2)
+            self.assertEqual(store.count_calls(run_id), 2)
+            truncation_events = [
+                event["payload"]
+                for event in store.list_events(run_id)
+                if event["event_type"] == "truncation_recovery"
+            ]
+            self.assertEqual(
+                [event["status"] for event in truncation_events],
+                ["not_dispatched"],
+            )
+            retry_recoveries = engine._provider_retry_recoveries(
+                run_id,
+                store.list_invocations(run_id),
+            )
+            self.assertEqual(
+                [
+                    recovery["status"]
+                    for recovery in retry_recoveries
+                    if recovery["kind"] == "truncation_retry"
+                ],
+                ["recovered"],
+            )
+
     def test_application_retry_does_not_consume_truncation_recovery(
         self,
     ) -> None:
@@ -1703,6 +2919,23 @@ class CouncilEngineTests(unittest.TestCase):
 
             self.assertEqual(store.list_runs(), [])
 
+    def test_preflight_rejects_unpaired_surrogate_before_creating_run(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            engine, providers, store = self._engine(Path(temporary))
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "cannot be encoded as UTF-8",
+            ):
+                engine.run("invalid \ud800 question")
+
+            self.assertEqual(store.list_runs(), [])
+            self.assertTrue(
+                all(not provider.calls for provider in providers.values())
+            )
+
     def test_idempotency_key_returns_the_same_run(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             engine, _providers, _store = self._engine(Path(temporary))
@@ -1779,18 +3012,110 @@ class CouncilEngineTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "synthesis provider"):
                 changed_synthesizer.resume(result["run_id"])
 
+            changed_fallbacks = CouncilEngine(
+                store=store,
+                providers=providers,
+                policy=engine.policy,
+                synthesis_provider="alpha",
+                synthesis_fallbacks=("beta",),
+            )
+            with self.assertRaisesRegex(ValueError, "provider chain"):
+                changed_fallbacks.resume(result["run_id"])
+
+    def test_lock_rejects_changed_synthesis_fallback_order(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            engine, providers, store = self._ordered_engine(
+                Path(temporary)
+            )
+            result = engine.run("Lock the fallback order.")
+            reordered = CouncilEngine(
+                store=store,
+                providers=providers,
+                policy=engine.policy,
+                synthesis_provider="alpha",
+                synthesis_fallbacks=("gamma", "beta"),
+            )
+
+            with self.assertRaisesRegex(ValueError, "provider chain"):
+                reordered.resume(result["run_id"])
+
     def test_policy_lock_defaults_missing_parallel_limit(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
-            engine, _providers, _store = self._engine(Path(temporary))
+            engine, providers, store = self._engine(Path(temporary))
             locked = engine.policy.to_dict()
             locked.pop("max_parallel_calls")
             locked["synthesis_provider"] = "alpha"
 
             engine._validate_policy_lock(locked)
 
+            ordered = CouncilEngine(
+                store=store,
+                providers=providers,
+                policy=engine.policy,
+                synthesis_provider="alpha",
+                synthesis_fallbacks=("beta",),
+            )
+            with self.assertRaisesRegex(ValueError, "provider chain"):
+                ordered._validate_policy_lock(locked)
+
+            malformed = dict(locked)
+            malformed["synthesis_fallbacks"] = "beta"
+            with self.assertRaisesRegex(ValueError, "malformed"):
+                engine._validate_policy_lock(malformed)
+
             locked["unexpected_policy_field"] = True
             with self.assertRaisesRegex(ValueError, "unknown fields"):
                 engine._validate_policy_lock(locked)
+
+    def test_completed_resume_rejects_duplicate_fallback_events(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            engine, _providers, store = self._ordered_engine(
+                Path(temporary),
+                synthesis_failures={"alpha"},
+            )
+            result = engine.run("Validate fallback audit before returning.")
+            fallback_event = next(
+                event
+                for event in store.list_events(result["run_id"])
+                if event["event_type"] == "synthesis_fallback_advanced"
+            )
+            store.append_event(
+                result["run_id"],
+                "synthesis_fallback_advanced",
+                fallback_event["payload"],
+            )
+
+            with self.assertRaisesRegex(ValueError, "fallback audit"):
+                engine.resume(result["run_id"])
+
+    def test_completed_resume_rejects_fallback_from_success(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            engine, _providers, store = self._ordered_engine(
+                Path(temporary)
+            )
+            result = engine.run("Reject a forged fallback transition.")
+            store.append_event(
+                result["run_id"],
+                "synthesis_fallback_advanced",
+                {
+                    "version": 1,
+                    "from_position": 1,
+                    "from_provider": "alpha",
+                    "to_position": 2,
+                    "to_provider": "beta",
+                    "reason_category": ErrorCategory.PROVIDER_SERVER.value,
+                    "ambiguous": False,
+                    "failure": ProviderError(
+                        "forged fallback failure",
+                        category=ErrorCategory.PROVIDER_SERVER,
+                        retryable=False,
+                        ambiguous=False,
+                    ).to_dict(),
+                },
+            )
+
+            with self.assertRaisesRegex(ValueError, "invocation"):
+                engine.resume(result["run_id"])
 
     def test_crash_left_running_call_is_marked_ambiguous_not_retried(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

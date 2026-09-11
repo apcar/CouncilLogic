@@ -1,0 +1,17 @@
+# Explicit public files keep source archives self-contained without sweeping in private records.
+include CHANGELOG.md
+include CITATION.cff
+include CONTRIBUTING.md
+include council.example.toml
+include assets/README.md
+include assets/councillogic-icon.png
+include assets/councillogic-mark.svg
+include docs/OPERATIONS.md
+include docs/PORTABLE-SERVICE.md
+include docs/RESEARCH.md
+include docs/SECURITY.md
+include docs/adr/0001-single-active-sqlite.md
+include docs/adr/0002-agpl-and-commercial-licensing.md
+include docs/assets/councillogic-header.svg
+include examples/mock-governance-proof/README.md
+include scripts/gate1_mock_soak.py

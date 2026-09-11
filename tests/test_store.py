@@ -269,6 +269,141 @@ class CouncilStoreTest(unittest.TestCase):
             failure.to_dict(),
         )
 
+    def test_undispatched_retry_restores_exact_prior_failure(self) -> None:
+        run_id = self.create_run()
+        invocation_id = self.store.start_invocation(
+            run_id,
+            "synthesis",
+            "alpha",
+            "alpha-1",
+            "lab-alpha",
+            "Synthesize the record.",
+        )
+        failure = ProviderError(
+            "provider was unavailable",
+            category=ErrorCategory.PROVIDER_SERVER,
+            retryable=True,
+            status_code=503,
+            request_id="prior-provider-request",
+            attempts=2,
+            ambiguous=False,
+            client_request_id="prior-client-request",
+            elapsed_ms=412,
+            transport_phase="response_headers",
+            provider_error_code="unavailable",
+        )
+        self.store.finish_invocation_failure(invocation_id, failure)
+        prior = self.store.get_invocation(invocation_id)
+        assert prior is not None
+
+        restarted = self.store.start_invocation(
+            run_id,
+            "synthesis",
+            "alpha",
+            "alpha-1",
+            "lab-alpha",
+            "Synthesize the record.",
+        )
+        self.assertEqual(restarted, invocation_id)
+        denial = ProviderError(
+            "service quota denied before dispatch",
+            category=ErrorCategory.BUDGET,
+            retryable=False,
+            ambiguous=False,
+        )
+        self.store.release_undispatched_invocation(
+            invocation_id,
+            denial,
+            reservation_attempt=2,
+            prior_invocation=prior,
+        )
+
+        self.assertEqual(self.store.get_invocation(invocation_id), prior)
+        self.assertEqual(self.store.count_calls(run_id), 1)
+        retry_events = [
+            event
+            for event in self.store.list_events(run_id)
+            if event["event_type"] == "provider_retry_started"
+        ]
+        self.assertEqual(retry_events, [])
+        undispatched = [
+            event["payload"]
+            for event in self.store.list_events(run_id)
+            if event["event_type"] == "provider_call_not_dispatched"
+        ]
+        self.assertEqual(len(undispatched), 1)
+        self.assertEqual(undispatched[0]["reservation_attempt"], 2)
+        self.assertEqual(undispatched[0]["attempted_call_count"], 2)
+        self.assertEqual(undispatched[0]["restored_call_count"], 1)
+        self.assertEqual(undispatched[0]["retry_kind"], "application")
+        self.assertEqual(undispatched[0]["prior_failure"], failure.to_dict())
+        self.assertEqual(undispatched[0]["error"], denial.to_dict())
+
+        self.store.start_invocation(
+            run_id,
+            "synthesis",
+            "alpha",
+            "alpha-1",
+            "lab-alpha",
+            "Synthesize the record.",
+        )
+        retry_events = [
+            event["payload"]
+            for event in self.store.list_events(run_id)
+            if event["event_type"] == "provider_retry_started"
+        ]
+        self.assertEqual(
+            [event["retry_call_count"] for event in retry_events],
+            [2],
+        )
+
+    def test_first_undispatched_invocation_is_removed_and_audited(self) -> None:
+        run_id = self.create_run()
+        invocation_id = self.store.start_invocation(
+            run_id,
+            "proposal",
+            "alpha",
+            "alpha-1",
+            "lab-alpha",
+            "Draft a proposal.",
+        )
+        denial = ProviderError(
+            "deadline exhausted before provider dispatch",
+            category=ErrorCategory.TIMEOUT,
+            retryable=True,
+            ambiguous=False,
+        )
+
+        self.store.release_undispatched_invocation(
+            invocation_id,
+            denial,
+            reservation_attempt=1,
+        )
+
+        self.assertIsNone(self.store.get_invocation(invocation_id))
+        self.assertEqual(self.store.count_calls(run_id), 0)
+        event = next(
+            event["payload"]
+            for event in self.store.list_events(run_id)
+            if event["event_type"] == "provider_call_not_dispatched"
+        )
+        self.assertEqual(event["reservation_attempt"], 1)
+        self.assertEqual(event["attempted_call_count"], 1)
+        self.assertEqual(event["restored_call_count"], 0)
+        self.assertIsNone(event["prior_failure"])
+        self.assertIsNone(event["retry_kind"])
+
+        fresh_id = self.store.start_invocation(
+            run_id,
+            "proposal",
+            "alpha",
+            "alpha-1",
+            "lab-alpha",
+            "Draft a proposal.",
+        )
+        self.assertNotEqual(fresh_id, invocation_id)
+        self.assertEqual(self.store.count_calls(run_id), 1)
+
     def test_events_are_concurrent_and_reopen_cleanly(self) -> None:
         run_id = self.create_run(key="reopen")
 

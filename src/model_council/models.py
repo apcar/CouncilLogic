@@ -7,6 +7,56 @@ from typing import Any
 
 COUNCIL_STAGES = frozenset({"proposal", "jury", "synthesis"})
 
+# Provider error payloads are untrusted and may contain user data, secrets, or
+# verbose messages. Only this small set of reviewed machine-readable codes is
+# safe to retain in durable diagnostics.
+SAFE_PROVIDER_ERROR_CODES = frozenset(
+    {
+        "api_error",
+        "authentication_error",
+        "billing_error",
+        "context_length_exceeded",
+        "content_policy_violation",
+        "deadline_exceeded",
+        "gateway_timeout",
+        "insufficient_quota",
+        "internal",
+        "invalid_api_key",
+        "invalid_argument",
+        "invalid_request_error",
+        "missing_required_parameter",
+        "model_not_found",
+        "not_found",
+        "not_found_error",
+        "overloaded_error",
+        "permission_denied",
+        "permission_error",
+        "rate_limit_error",
+        "rate_limit_exceeded",
+        "request_too_large",
+        "resource_exhausted",
+        "unauthenticated",
+        "unavailable",
+        "unsupported_parameter",
+    }
+)
+SAFE_PROVIDER_ERROR_CODE_MAX_CHARS = 64
+
+
+def safe_provider_error_code(value: Any) -> str | None:
+    """Return one canonical allowlisted provider code, never raw error text."""
+
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip().casefold()
+    if (
+        not normalized
+        or len(normalized) > SAFE_PROVIDER_ERROR_CODE_MAX_CHARS
+        or normalized not in SAFE_PROVIDER_ERROR_CODES
+    ):
+        return None
+    return normalized
+
 
 class ErrorCategory(StrEnum):
     AUTHENTICATION = "authentication"
@@ -188,6 +238,7 @@ class ProviderError(RuntimeError):
         elapsed_ms: int | None = None,
         transport_phase: str | None = None,
         timeout_subtype: str | None = None,
+        provider_error_code: str | None = None,
     ) -> None:
         super().__init__(message)
         self.category = category
@@ -200,6 +251,9 @@ class ProviderError(RuntimeError):
         self.elapsed_ms = elapsed_ms
         self.transport_phase = transport_phase
         self.timeout_subtype = timeout_subtype
+        self.provider_error_code = safe_provider_error_code(
+            provider_error_code
+        )
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -214,4 +268,5 @@ class ProviderError(RuntimeError):
             "elapsed_ms": self.elapsed_ms,
             "transport_phase": self.transport_phase,
             "timeout_subtype": self.timeout_subtype,
+            "provider_error_code": self.provider_error_code,
         }

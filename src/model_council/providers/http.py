@@ -15,8 +15,16 @@ from urllib.parse import urlparse
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 import uuid
 
-from model_council.models import ErrorCategory, ProviderError
 from model_council.version import PACKAGE_VERSION
+from model_council.models import (
+    ErrorCategory,
+    ProviderError,
+    safe_provider_error_code,
+)
+
+
+_ERROR_DIAGNOSTIC_BODY_MAX_BYTES = 64 * 1024
+_ERROR_CODE_FIELDS = ("code", "type", "status")
 
 
 @dataclass(frozen=True)
@@ -105,10 +113,41 @@ def response_request_id(headers: Mapping[str, str]) -> str | None:
     return None
 
 
+def response_provider_error_code(body: bytes) -> str | None:
+    """Extract one safe machine code without retaining provider error text."""
+
+    if (
+        not isinstance(body, bytes)
+        or not body
+        or len(body) > _ERROR_DIAGNOSTIC_BODY_MAX_BYTES
+    ):
+        return None
+    try:
+        decoded = json.loads(body.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError, RecursionError):
+        return None
+    if not isinstance(decoded, dict):
+        return None
+
+    containers: list[Mapping[str, Any]] = []
+    nested = decoded.get("error")
+    if isinstance(nested, dict):
+        containers.append(nested)
+    containers.append(decoded)
+    for container in containers:
+        for field in _ERROR_CODE_FIELDS:
+            safe_code = safe_provider_error_code(container.get(field))
+            if safe_code is not None:
+                return safe_code
+    return None
+
+
 def _classified_http_error(
     status_code: int,
     *,
     request_id: str | None,
+    client_request_id: str,
+    provider_error_code: str | None,
 ) -> ProviderError:
     if status_code == 401:
         category = ErrorCategory.AUTHENTICATION
@@ -142,6 +181,8 @@ def _classified_http_error(
         status_code=status_code,
         request_id=request_id,
         ambiguous=False,
+        client_request_id=client_request_id,
+        provider_error_code=provider_error_code,
     )
 
 
@@ -158,6 +199,7 @@ def _with_attempts(error: ProviderError, attempts: int) -> ProviderError:
         elapsed_ms=error.elapsed_ms,
         transport_phase=error.transport_phase,
         timeout_subtype=error.timeout_subtype,
+        provider_error_code=error.provider_error_code,
     )
 
 
@@ -236,8 +278,10 @@ class JsonHttpClient:
             "Accept": "application/json",
             "Content-Type": "application/json",
             "User-Agent": f"model-council/{PACKAGE_VERSION}",
-            "X-Client-Request-Id": client_request_id,
             **dict(headers),
+            # Keep this transport-owned correlation ID authoritative even if
+            # a caller supplied a header with the same case-insensitive name.
+            "X-Client-Request-Id": client_request_id,
         }
 
         for attempt in range(1, attempts_allowed + 1):
@@ -318,6 +362,7 @@ class JsonHttpClient:
                         exc.transport_phase or "request_in_flight"
                     ),
                     timeout_subtype=exc.timeout_subtype,
+                    provider_error_code=exc.provider_error_code,
                 )
                 raise _with_attempts(enriched, attempt) from None
             except Exception as exc:
@@ -346,6 +391,10 @@ class JsonHttpClient:
                 error = _classified_http_error(
                     response.status_code,
                     request_id=request_id,
+                    client_request_id=client_request_id,
+                    provider_error_code=response_provider_error_code(
+                        response.body
+                    ),
                 )
                 if (
                     error.retryable

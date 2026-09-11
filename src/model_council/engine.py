@@ -4,6 +4,7 @@ import hashlib
 import random
 import time
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
+from dataclasses import dataclass
 from typing import Any, Protocol
 
 from .models import (
@@ -43,6 +44,24 @@ _ADJUDICATION_EVENT = "adjudication_locked"
 _ADJUDICATION_VERSION = 1
 _JURY_REPAIR_EVENT = "jury_artifact_repair"
 _PROVIDER_RETRY_EVENT = "provider_retry_started"
+_SYNTHESIS_FALLBACK_EVENT = "synthesis_fallback_advanced"
+_SYNTHESIS_FALLBACK_VERSION = 1
+_PROVIDER_ERROR_FIELDS = frozenset(
+    {
+        "message",
+        "category",
+        "retryable",
+        "status_code",
+        "request_id",
+        "attempts",
+        "ambiguous",
+        "client_request_id",
+        "elapsed_ms",
+        "transport_phase",
+        "timeout_subtype",
+        "provider_error_code",
+    }
+)
 
 
 class CallLease(Protocol):
@@ -65,6 +84,17 @@ class CallGate(Protocol):
         """Authorize and durably reserve one application-level provider call."""
 
 
+@dataclass(frozen=True)
+class _ProviderCallOutcome:
+    invocation_id: str | None
+    lease: CallLease | None
+    response: ProviderResponse | None
+    error: ProviderError | None
+    output_limit: int
+    dispatched: bool
+    reservation_attempt: int | None = None
+
+
 class CouncilEngine:
     def __init__(
         self,
@@ -73,16 +103,37 @@ class CouncilEngine:
         providers: dict[str, Provider],
         policy: RunPolicy,
         synthesis_provider: str,
+        synthesis_fallbacks: tuple[str, ...] = (),
         call_gate: CallGate | None = None,
     ) -> None:
         if not providers:
             raise ValueError("At least one provider is required")
-        if synthesis_provider not in providers:
-            raise ValueError("Synthesis provider is not available")
+        synthesis_providers = (
+            synthesis_provider,
+            *tuple(synthesis_fallbacks),
+        )
+        if len(set(synthesis_providers)) != len(synthesis_providers):
+            raise ValueError("Synthesis providers must not contain duplicates")
+        unavailable = [
+            name for name in synthesis_providers if name not in providers
+        ]
+        if unavailable:
+            raise ValueError(
+                "Synthesis providers are not available: "
+                + ", ".join(unavailable)
+            )
+        required_calls = len(providers) * 2 + len(synthesis_providers)
+        if policy.max_calls < required_calls:
+            raise ValueError(
+                "Max calls is too small for proposals, juries, and configured "
+                "synthesis attempts"
+            )
         self.store = store
         self.providers = providers
         self.policy = policy
         self.synthesis_provider = synthesis_provider
+        self.synthesis_fallbacks = tuple(synthesis_fallbacks)
+        self.synthesis_providers = synthesis_providers
         self.call_gate = call_gate
 
     def run(
@@ -113,6 +164,7 @@ class CouncilEngine:
             clean_question,
             self.providers,
             self.policy,
+            synthesis_providers=self.synthesis_providers,
         )
         require_workload_within_limits(workload_plan)
         return self.store.create_run(
@@ -126,6 +178,7 @@ class CouncilEngine:
             policy={
                 **self.policy.to_dict(),
                 "synthesis_provider": self.synthesis_provider,
+                "synthesis_fallbacks": list(self.synthesis_fallbacks),
             },
             idempotency_key=idempotency_key,
             run_id=run_id,
@@ -146,6 +199,13 @@ class CouncilEngine:
         self._validate_provider_lock(run["provider_configs"])
         self._validate_policy_lock(run["policy"])
         existing_events = self.store.list_events(run_id)
+        (
+            current_synthesis_position,
+            advanced_synthesis_failures,
+        ) = self._load_synthesis_fallback_state(
+            run_id,
+            existing_events,
+        )
         namespace_lock = self._load_candidate_namespace_lock(
             run_id, existing_events
         )
@@ -171,6 +231,7 @@ class CouncilEngine:
             question,
             self.providers,
             self.policy,
+            synthesis_providers=self.synthesis_providers,
         )
         require_workload_within_limits(workload_plan)
         self.store.append_event(
@@ -392,9 +453,13 @@ class CouncilEngine:
                 jury_stage_failures,
             )
 
+        # Rebuild failures in protocol order on every resume. Durable
+        # synthesis transitions are loaded before the upstream locks, but
+        # their failures occurred after proposal and jury execution.
+        failures.extend(advanced_synthesis_failures)
         answer: str | None = None
+        selected_synthesis_provider: str | None = None
         if time.monotonic() < deadline:
-            synthesis_name = self.synthesis_provider
             synth_candidates = {
                 label: proposal_artifacts[provider_name]
                 for label, provider_name in candidate_mapping.items()
@@ -412,21 +477,72 @@ class CouncilEngine:
                 anonymous_aggregate,
                 anonymous_juries,
             )
-            synth_responses, synth_failures, synthesis_recoveries = (
-                self._run_parallel_stage(
-                    run_id=run_id,
-                    stage="synthesis",
-                    prompts={synthesis_name: (synth_system, synth_user)},
-                    deadline=deadline,
+            for position, synthesis_name in enumerate(
+                self.synthesis_providers[current_synthesis_position - 1 :],
+                start=current_synthesis_position,
+            ):
+                if time.monotonic() >= deadline:
+                    break
+                synth_responses, synth_failures, synthesis_recoveries = (
+                    self._run_parallel_stage(
+                        run_id=run_id,
+                        stage="synthesis",
+                        prompts={
+                            synthesis_name: (synth_system, synth_user)
+                        },
+                        deadline=deadline,
+                        # A durable transition makes every earlier slot final.
+                        # The current slot may be safely retried on a later
+                        # resume when its prior failure was non-ambiguous. This
+                        # preserves singleton-run recovery without ever moving
+                        # backward after a fallback was recorded.
+                        retry_failed_invocations=(
+                            position == current_synthesis_position
+                            and position == len(self.synthesis_providers)
+                        ),
+                    )
                 )
-            )
-            failures.extend(synth_failures)
-            recoveries.extend(synthesis_recoveries)
-            if synthesis_name in synth_responses:
-                answer = synth_responses[synthesis_name].content
+                failures.extend(synth_failures)
+                recoveries.extend(synthesis_recoveries)
+                if synthesis_name in synth_responses:
+                    answer = synth_responses[synthesis_name].content
+                    selected_synthesis_provider = synthesis_name
+                    break
+                if (
+                    position < len(self.synthesis_providers)
+                    and time.monotonic() < deadline
+                ):
+                    failure = next(
+                        (
+                            item
+                            for item in reversed(synth_failures)
+                            if item.get("provider") == synthesis_name
+                        ),
+                        None,
+                    )
+                    if failure is None:
+                        raise RuntimeError(
+                            "Synthesis fallback has no failure record"
+                        )
+                    self._persist_synthesis_fallback_event(
+                        run_id=run_id,
+                        from_position=position,
+                        to_position=position + 1,
+                        failure=failure,
+                    )
 
         if answer is None:
             warnings.append("Synthesis did not complete; raw council record preserved")
+        elif selected_synthesis_provider != self.synthesis_provider:
+            selected_position = self.synthesis_providers.index(
+                selected_synthesis_provider
+            ) + 1
+            warnings.append(
+                "Synthesis completed with fallback provider "
+                f"{selected_synthesis_provider} after "
+                f"{selected_position - 1} unsuccessful "
+                "synthesis attempt(s)."
+            )
         status = "completed" if answer is not None else "partial"
         result = self._build_result(
             run_id=run_id,
@@ -541,13 +657,14 @@ class CouncilEngine:
             for record in self.store.list_invocations(run_id)
             if record["stage"] == "jury_repair"
         }
-        # Keep one call available for synthesis. Repairs consume only currently
-        # unused call capacity. Persisted repair invocations do not need new
-        # capacity and must always be selected on resume so their outcome
-        # cannot disappear.
+        # Keep every configured synthesis attempt available. Persisted repair
+        # invocations do not need new capacity and must always be selected on
+        # resume so their outcome cannot disappear.
         new_repair_capacity = max(
             0,
-            self.policy.max_calls - self.store.count_calls(run_id) - 1,
+            self.policy.max_calls
+            - self.store.count_calls(run_id)
+            - len(self.synthesis_providers),
         )
         new_repair_names = [
             name
@@ -834,6 +951,177 @@ class CouncilEngine:
         self.store.append_event(run_id, _JURY_REPAIR_EVENT, payload)
         return dict(payload)
 
+    def _persist_synthesis_fallback_event(
+        self,
+        *,
+        run_id: str,
+        from_position: int,
+        to_position: int,
+        failure: dict[str, Any],
+    ) -> dict[str, Any]:
+        provider_name = self.synthesis_providers[from_position - 1]
+        if (
+            failure.get("stage") != "synthesis"
+            or failure.get("provider") != provider_name
+        ):
+            raise ValueError("Synthesis fallback failure is inconsistent")
+        failure_value = {
+            key: value
+            for key, value in failure.items()
+            if key not in {"stage", "provider"}
+        }
+        if set(failure_value) != _PROVIDER_ERROR_FIELDS:
+            raise ValueError("Synthesis fallback failure is malformed")
+        payload = {
+            "version": _SYNTHESIS_FALLBACK_VERSION,
+            "from_position": from_position,
+            "from_provider": provider_name,
+            "to_position": to_position,
+            "to_provider": self.synthesis_providers[to_position - 1],
+            "reason_category": str(
+                failure.get("category") or ErrorCategory.UNKNOWN.value
+            ),
+            "ambiguous": bool(failure.get("ambiguous", False)),
+            "failure": failure_value,
+        }
+        matching = [
+            event
+            for event in self.store.list_events(run_id)
+            if event["event_type"] == _SYNTHESIS_FALLBACK_EVENT
+            and event.get("payload", {}).get("from_position")
+            == from_position
+        ]
+        if len(matching) > 1:
+            raise ValueError("Run contains duplicate synthesis fallback events")
+        if matching:
+            existing = dict(matching[0]["payload"])
+            if existing != payload:
+                raise ValueError("Synthesis fallback audit event is inconsistent")
+            return existing
+        self.store.append_event(run_id, _SYNTHESIS_FALLBACK_EVENT, payload)
+        self._load_synthesis_fallback_state(run_id)
+        return dict(payload)
+
+    def _load_synthesis_fallback_state(
+        self,
+        run_id: str,
+        events: list[dict[str, Any]] | None = None,
+    ) -> tuple[int, list[dict[str, Any]]]:
+        """Validate the durable transition prefix and return its current slot."""
+
+        matching = [
+            event
+            for event in (
+                self.store.list_events(run_id)
+                if events is None
+                else events
+            )
+            if event["event_type"] == _SYNTHESIS_FALLBACK_EVENT
+        ]
+        expected_keys = {
+            "version",
+            "from_position",
+            "from_provider",
+            "to_position",
+            "to_provider",
+            "reason_category",
+            "ambiguous",
+            "failure",
+        }
+        invocations = {
+            str(invocation["provider"]): invocation
+            for invocation in self.store.list_invocations(run_id)
+            if invocation["stage"] == "synthesis"
+            and invocation["provider"] in self.synthesis_providers
+        }
+        advanced_failures: list[dict[str, Any]] = []
+        for expected_position, event in enumerate(matching, start=1):
+            payload = event.get("payload")
+            if not isinstance(payload, dict) or set(payload) != expected_keys:
+                raise ValueError("Synthesis fallback audit event is malformed")
+            from_position = payload.get("from_position")
+            to_position = payload.get("to_position")
+            if (
+                payload.get("version") != _SYNTHESIS_FALLBACK_VERSION
+                or type(from_position) is not int
+                or type(to_position) is not int
+                or from_position != expected_position
+                or to_position != expected_position + 1
+                or to_position > len(self.synthesis_providers)
+                or payload.get("from_provider")
+                != self.synthesis_providers[from_position - 1]
+                or payload.get("to_provider")
+                != self.synthesis_providers[to_position - 1]
+                or type(payload.get("ambiguous")) is not bool
+            ):
+                raise ValueError("Synthesis fallback audit event is inconsistent")
+            try:
+                ErrorCategory(str(payload.get("reason_category")))
+            except ValueError as exc:
+                raise ValueError(
+                    "Synthesis fallback audit event has an invalid category"
+                ) from exc
+
+            failure_value = payload.get("failure")
+            if (
+                not isinstance(failure_value, dict)
+                or set(failure_value) != _PROVIDER_ERROR_FIELDS
+                or not isinstance(failure_value.get("message"), str)
+                or type(failure_value.get("retryable")) is not bool
+                or type(failure_value.get("ambiguous")) is not bool
+                or failure_value.get("category")
+                != payload["reason_category"]
+                or failure_value.get("ambiguous") != payload["ambiguous"]
+            ):
+                raise ValueError(
+                    "Synthesis fallback audit failure is inconsistent"
+                )
+
+            provider_name = str(payload["from_provider"])
+            invocation = invocations.get(provider_name)
+            if invocation is not None:
+                stored_error = invocation.get("error")
+                if (
+                    invocation.get("status") != "failed"
+                    or not isinstance(stored_error, dict)
+                    or stored_error != failure_value
+                ):
+                    raise ValueError(
+                        "Synthesis fallback audit event disagrees with its "
+                        "invocation"
+                    )
+                advanced_failures.append(
+                    {
+                        "stage": "synthesis",
+                        "provider": provider_name,
+                        **dict(stored_error),
+                    }
+                )
+            else:
+                advanced_failures.append(
+                    {
+                        "stage": "synthesis",
+                        "provider": provider_name,
+                        **dict(failure_value),
+                    }
+                )
+
+        current_position = len(matching) + 1
+        successful_positions = [
+            self.synthesis_providers.index(provider_name) + 1
+            for provider_name, invocation in invocations.items()
+            if invocation.get("status") == "succeeded"
+        ]
+        if len(successful_positions) > 1 or (
+            successful_positions
+            and successful_positions[0] != current_position
+        ):
+            raise ValueError(
+                "Synthesis fallback audit state disagrees with successful "
+                "invocations"
+            )
+        return current_position, advanced_failures
+
     def _run_parallel_stage(
         self,
         *,
@@ -861,8 +1149,26 @@ class CouncilEngine:
             (record["stage"], record["provider"]): record
             for record in self.store.list_invocations(run_id)
         }
+        events = self.store.list_events(run_id)
         truncation_retry_counts: dict[str, int] = {}
-        for event in self.store.list_events(run_id):
+        recorded_truncation_recoveries = {
+            str(payload["provider"]): dict(payload)
+            for event in events
+            if event["event_type"] == "truncation_recovery"
+            and isinstance((payload := event.get("payload")), dict)
+            and payload.get("stage") == stage
+            and isinstance(payload.get("provider"), str)
+            and payload.get("status") != "not_dispatched"
+        }
+        preserved_truncations = {
+            str(payload["provider"]): dict(payload)
+            for event in events
+            if event["event_type"] == "truncated_response_preserved"
+            and isinstance((payload := event.get("payload")), dict)
+            and payload.get("stage") == stage
+            and isinstance(payload.get("provider"), str)
+        }
+        for event in events:
             if event["event_type"] != _PROVIDER_RETRY_EVENT:
                 continue
             payload = event.get("payload")
@@ -907,12 +1213,11 @@ class CouncilEngine:
                 record
                 and record["status"] == "failed"
                 and record.get("error_ambiguous")
-                and not retry_failed_invocations
             ):
                 stored_error = record.get("error")
                 if not isinstance(stored_error, dict):
                     raise ValueError(
-                        "Ambiguous repair failure record is malformed"
+                        "Ambiguous provider failure record is malformed"
                     )
                 failures.append(
                     {
@@ -922,13 +1227,7 @@ class CouncilEngine:
                     }
                 )
                 continue
-            if record and (
-                record["status"] == "running"
-                or (
-                    record["status"] == "failed"
-                    and record.get("error_ambiguous")
-                )
-            ):
+            if record and record["status"] == "running":
                 ambiguous = ProviderError(
                     "Prior invocation outcome is ambiguous; automatic retry refused",
                     category=ErrorCategory.UNKNOWN,
@@ -967,6 +1266,38 @@ class CouncilEngine:
                             ProviderError(
                                 "Prior repair invocation failed; automatic "
                                 "retry refused",
+                                category=ErrorCategory.INVALID_RESPONSE,
+                                retryable=False,
+                                request_id=record.get("request_id"),
+                                attempts=int(record.get("attempts") or 1),
+                                ambiguous=False,
+                            ),
+                        )
+                )
+                continue
+            if (
+                record
+                and self._is_length_failure_record(record)
+                and provider_name in recorded_truncation_recoveries
+            ):
+                stored_error = record.get("error")
+                if isinstance(stored_error, dict):
+                    failures.append(
+                        {
+                            "stage": stage,
+                            "provider": provider_name,
+                            **dict(stored_error),
+                        }
+                    )
+                else:
+                    failures.append(
+                        self._failure_payload(
+                            stage,
+                            provider_name,
+                            ProviderError(
+                                "Known output-length recovery is exhausted; "
+                                "automatic retry refused "
+                                "(finish_reason=length)",
                                 category=ErrorCategory.INVALID_RESPONSE,
                                 retryable=False,
                                 request_id=record.get("request_id"),
@@ -1013,17 +1344,35 @@ class CouncilEngine:
             return successes, failures, recoveries
         if time.monotonic() >= deadline:
             for provider_name in work:
-                failures.append(
-                    self._failure_payload(
-                        stage,
-                        provider_name,
-                        ProviderError(
-                            "Run deadline exhausted",
-                            category=ErrorCategory.TIMEOUT,
-                            retryable=True,
-                        ),
-                    )
+                prior_record = existing_records.get(
+                    (stage, provider_name)
                 )
+                prior_error = (
+                    prior_record.get("error")
+                    if prior_record is not None
+                    and prior_record.get("status") == "failed"
+                    else None
+                )
+                if isinstance(prior_error, dict):
+                    failures.append(
+                        {
+                            "stage": stage,
+                            "provider": provider_name,
+                            **dict(prior_error),
+                        }
+                    )
+                else:
+                    failures.append(
+                        self._failure_payload(
+                            stage,
+                            provider_name,
+                            ProviderError(
+                                "Run deadline exhausted",
+                                category=ErrorCategory.TIMEOUT,
+                                retryable=True,
+                            ),
+                        )
+                    )
             return successes, failures, recoveries
 
         for provider_name, prompt_pair in list(work.items()):
@@ -1048,17 +1397,159 @@ class CouncilEngine:
         if not work:
             return successes, failures, recoveries
 
+        prior_truncations = {
+            provider_name
+            for provider_name in work
+            if self._is_length_failure_record(
+                existing_records.get((stage, provider_name))
+            )
+        }
         calls_used = self.store.count_calls(run_id)
         remaining = max(0, self.policy.max_calls - calls_used)
-        allowed_names = list(work)[:remaining]
-        denied_names = list(work)[remaining:]
+        work_names = list(work)
+        synthesis_result_exists = (
+            any(
+                self.store.get_successful_invocation(
+                    run_id,
+                    "synthesis",
+                    provider_name,
+                )
+                is not None
+                for provider_name in self.synthesis_providers
+            )
+        )
+        if synthesis_result_exists:
+            downstream_call_reserve = 0
+        elif stage == "synthesis":
+            synthesis_positions = [
+                self.synthesis_providers.index(provider_name)
+                for provider_name in work_names
+                if provider_name in self.synthesis_providers
+            ]
+            downstream_call_reserve = (
+                len(self.synthesis_providers)
+                - min(synthesis_positions)
+                - 1
+                if synthesis_positions
+                else len(self.synthesis_providers)
+            )
+        elif stage == "proposal":
+            downstream_call_reserve = (
+                len(self.providers)
+                + len(self.synthesis_providers)
+            )
+        else:
+            downstream_call_reserve = len(self.synthesis_providers)
+        if stage == "proposal":
+            reservation_reason = (
+                "call budget reserved for jury calls and synthesis"
+            )
+        else:
+            reservation_reason = "call budget reserved for synthesis"
+        dispatch_capacity = max(
+            0,
+            remaining - downstream_call_reserve,
+        )
+        allowed_names = work_names[:dispatch_capacity]
+        denied_names = work_names[dispatch_capacity:]
+        downstream_reserved_names = set(
+            work_names[dispatch_capacity:remaining]
+            if downstream_call_reserve
+            else []
+        )
         for provider_name in denied_names:
+            if provider_name in prior_truncations:
+                record = existing_records[(stage, provider_name)]
+                stored_error = record.get("error")
+                if isinstance(stored_error, dict):
+                    failures.append(
+                        {
+                            "stage": stage,
+                            "provider": provider_name,
+                            **dict(stored_error),
+                        }
+                    )
+                else:
+                    failures.append(
+                        self._failure_payload(
+                            stage,
+                            provider_name,
+                            ProviderError(
+                                "Provider response did not complete normally "
+                                "(finish_reason=length)",
+                                category=ErrorCategory.INVALID_RESPONSE,
+                                retryable=False,
+                                request_id=record.get("request_id"),
+                                attempts=int(record.get("attempts") or 1),
+                                ambiguous=False,
+                            ),
+                        )
+                    )
+                preserved = preserved_truncations.get(provider_name, {})
+                initial_limit_value = preserved.get(
+                    "requested_max_output_tokens"
+                )
+                initial_limit = (
+                    int(initial_limit_value)
+                    if isinstance(initial_limit_value, int)
+                    and not isinstance(initial_limit_value, bool)
+                    else self.providers[
+                        provider_name
+                    ].config.output_tokens_for(provider_stage)
+                )
+                recovery_limit = output_overrides.get(
+                    provider_name,
+                    min(
+                        max(initial_limit + 1_024, initial_limit * 2),
+                        self.policy.max_recovery_output_tokens,
+                    ),
+                )
+                recovery = {
+                    "stage": stage,
+                    "provider": provider_name,
+                    "status": "not_attempted",
+                    "reason": (
+                        reservation_reason
+                        if provider_name in downstream_reserved_names
+                        else "run call budget exhausted"
+                    ),
+                    "initial_finish_reason": "length",
+                    "initial_max_output_tokens": initial_limit,
+                    "recovery_max_output_tokens": recovery_limit,
+                    "final_failure_recorded": True,
+                }
+                self.store.append_event(
+                    run_id,
+                    "truncation_recovery",
+                    recovery,
+                )
+                recoveries.append(recovery)
+                continue
+            prior_record = existing_records.get((stage, provider_name))
+            if prior_record and prior_record.get("status") == "failed":
+                stored_error = prior_record.get("error")
+                if not isinstance(stored_error, dict):
+                    raise ValueError(
+                        "Prior provider failure record is malformed"
+                    )
+                failures.append(
+                    {
+                        "stage": stage,
+                        "provider": provider_name,
+                        **dict(stored_error),
+                    }
+                )
+                continue
             failures.append(
                 self._failure_payload(
                     stage,
                     provider_name,
                     ProviderError(
-                        "Run call budget exhausted",
+                        (
+                            "Run " + reservation_reason
+                            if provider_name in downstream_reserved_names
+                            else "Run call budget exhausted"
+                        ),
                         category=ErrorCategory.BUDGET,
                         retryable=False,
                     ),
@@ -1067,21 +1558,11 @@ class CouncilEngine:
         if not allowed_names:
             return successes, failures, recoveries
 
-        future_map: dict[
-            Future[ProviderResponse],
-            tuple[str, str, CallLease | None, int, float],
-        ] = {}
+        future_map: dict[Future[_ProviderCallOutcome], str] = {}
         recoverable: dict[
             str,
-            tuple[tuple[str, str], ProviderResponse, int],
+            tuple[tuple[str, str], ProviderResponse, int, int],
         ] = {}
-        prior_truncations = {
-            provider_name
-            for provider_name in allowed_names
-            if self._is_length_failure_record(
-                existing_records.get((stage, provider_name))
-            )
-        }
         max_workers = min(
             self.policy.max_parallel_calls,
             len(allowed_names),
@@ -1092,18 +1573,6 @@ class CouncilEngine:
                 provider = self.providers[provider_name]
                 combined_prompt = (
                     f"[SYSTEM]\n{system_prompt}\n\n[USER]\n{user_prompt}"
-                )
-                invocation_id = self.store.start_invocation(
-                    run_id=run_id,
-                    stage=stage,
-                    provider=provider_name,
-                    model=provider.config.model,
-                    lineage=provider.config.lineage,
-                    prompt=combined_prompt,
-                )
-                invocation = self.store.get_invocation(invocation_id)
-                attempt = int(
-                    invocation.get("call_count") if invocation else 1
                 )
                 output_limit = output_overrides.get(
                     provider_name,
@@ -1117,84 +1586,79 @@ class CouncilEngine:
                         max(output_limit + 1_024, output_limit * 2),
                         self.policy.max_recovery_output_tokens,
                     )
-                timeout_limit = min(
-                    provider.config.timeout_for(provider_stage),
-                    max(0.001, deadline - time.monotonic()),
+                future = executor.submit(
+                    self._execute_provider_call,
+                    run_id=run_id,
+                    stage=stage,
+                    provider_stage=provider_stage,
+                    provider_name=provider_name,
+                    system_prompt=system_prompt,
+                    user_prompt=user_prompt,
+                    combined_prompt=combined_prompt,
+                    output_limit=output_limit,
+                    deadline=deadline,
                 )
-                lease: CallLease | None = None
-                try:
-                    if self.call_gate is not None:
-                        lease = self.call_gate.reserve(
-                            run_id=run_id,
-                            stage=stage,
-                            provider=provider.config,
-                            attempt=attempt,
-                        )
-                    future = executor.submit(
-                        provider.generate,
-                        system_prompt=system_prompt,
-                        user_prompt=user_prompt,
-                        stage=provider_stage,
-                        max_output_tokens=output_limit,
-                        timeout_seconds=timeout_limit,
-                    )
-                except ProviderError as exc:
-                    if lease is not None:
-                        lease.release()
-                    self.store.finish_invocation_failure(invocation_id, exc)
-                    failures.append(
-                        self._failure_payload(stage, provider_name, exc)
-                    )
-                    continue
-                except Exception as exc:
-                    if lease is not None:
-                        lease.release()
-                    safe_error = ProviderError(
-                        f"Provider dispatch failed safely: {type(exc).__name__}",
-                        category=ErrorCategory.UNKNOWN,
-                        retryable=False,
-                    )
-                    self.store.finish_invocation_failure(
-                        invocation_id,
-                        safe_error,
-                    )
-                    failures.append(
-                        self._failure_payload(
-                            stage,
-                            provider_name,
-                            safe_error,
-                        )
-                    )
-                    continue
-                future_map[future] = (
-                    provider_name,
-                    invocation_id,
-                    lease,
-                    output_limit,
-                    timeout_limit,
-                )
+                future_map[future] = provider_name
 
             for future in as_completed(future_map):
-                (
-                    provider_name,
-                    invocation_id,
-                    lease,
-                    output_limit,
-                    _timeout_limit,
-                ) = future_map[future]
-                response: ProviderResponse | None = None
-                provider_error: ProviderError | None = None
-                try:
-                    response = future.result()
-                except ProviderError as exc:
-                    provider_error = exc
-                except Exception as exc:  # defensive provider boundary
-                    provider_error = ProviderError(
-                        f"Unexpected provider failure: {type(exc).__name__}",
-                        category=ErrorCategory.UNKNOWN,
-                        retryable=False,
-                        ambiguous=True,
+                provider_name = future_map[future]
+                outcome = future.result()
+                invocation_id = outcome.invocation_id
+                lease = outcome.lease
+                response = outcome.response
+                provider_error = outcome.error
+                output_limit = outcome.output_limit
+                if not outcome.dispatched:
+                    if lease is not None:
+                        lease.release()
+                    assert provider_error is not None
+                    prior_record = existing_records.get(
+                        (stage, provider_name)
                     )
+                    if invocation_id is not None:
+                        if (
+                            not provider_error.ambiguous
+                            and outcome.reservation_attempt is not None
+                        ):
+                            self.store.release_undispatched_invocation(
+                                invocation_id,
+                                provider_error,
+                                reservation_attempt=(
+                                    outcome.reservation_attempt
+                                ),
+                                prior_invocation=prior_record,
+                            )
+                        else:
+                            self.store.finish_invocation_failure(
+                                invocation_id,
+                                provider_error,
+                            )
+                    if (
+                        prior_record is not None
+                        and prior_record.get("status") == "failed"
+                        and not provider_error.ambiguous
+                    ):
+                        prior_error = prior_record.get("error")
+                        if not isinstance(prior_error, dict):
+                            raise ValueError(
+                                "Prior provider failure record is malformed"
+                            )
+                        failures.append(
+                            {
+                                "stage": stage,
+                                "provider": provider_name,
+                                **dict(prior_error),
+                            }
+                        )
+                    else:
+                        failures.append(
+                            self._failure_payload(
+                                stage,
+                                provider_name,
+                                provider_error,
+                            )
+                        )
+                    continue
                 if (
                     lease is not None
                     and not (
@@ -1214,6 +1678,7 @@ class CouncilEngine:
                         )
                         response = None
                 if provider_error is not None:
+                    assert invocation_id is not None
                     self.store.finish_invocation_failure(
                         invocation_id,
                         provider_error,
@@ -1227,6 +1692,7 @@ class CouncilEngine:
                     )
                     continue
                 completion_error = self._completion_error(response)
+                assert invocation_id is not None
                 if completion_error is not None:
                     if (
                         response is not None
@@ -1253,10 +1719,18 @@ class CouncilEngine:
                             invocation_id,
                             completion_error,
                         )
+                        failed_invocation = self.store.get_invocation(
+                            invocation_id
+                        )
+                        if failed_invocation is None:
+                            raise RuntimeError(
+                                "Truncated invocation disappeared"
+                            )
                         recoverable[provider_name] = (
                             work[provider_name],
                             response,
                             output_limit,
+                            int(failed_invocation["call_count"]),
                         )
                         continue
                     if response is not None and preserve_incomplete_responses:
@@ -1287,11 +1761,15 @@ class CouncilEngine:
         if recoverable:
             recovery_prompts: dict[str, tuple[str, str]] = {}
             recovery_limits: dict[str, int] = {}
-            for provider_name, (
-                prompt_pair,
-                initial_response,
-                initial_limit,
-            ) in recoverable.items():
+            for provider_name in self.providers:
+                if provider_name not in recoverable:
+                    continue
+                (
+                    prompt_pair,
+                    initial_response,
+                    initial_limit,
+                    _initial_call_count,
+                ) = recoverable[provider_name]
                 recovery_limit = min(
                     max(initial_limit + 1_024, initial_limit * 2),
                     self.policy.max_recovery_output_tokens,
@@ -1336,7 +1814,11 @@ class CouncilEngine:
                     allow_truncation_recovery=False,
                     output_overrides=recovery_limits,
                     provider_stage=provider_stage,
-                    retry_failed_invocations=retry_failed_invocations,
+                    # The work set contains only responses truncated during
+                    # this execution. Permit that one known-safe retry even
+                    # when ordinary failed-slot retries are disabled, as they
+                    # are for ordered synthesis attempts.
+                    retry_failed_invocations=True,
                     preserve_incomplete_responses=(
                         preserve_incomplete_responses
                     ),
@@ -1347,14 +1829,41 @@ class CouncilEngine:
                 failed_recovery_providers = {
                     failure["provider"] for failure in recovery_failures
                 }
+                nested_recovery_providers = {
+                    recovery.get("provider")
+                    for recovery in nested_recoveries
+                    if recovery.get("stage") == stage
+                }
                 for provider_name, recovery_limit in recovery_limits.items():
+                    if provider_name in nested_recovery_providers:
+                        continue
+                    current_invocation = next(
+                        (
+                            invocation
+                            for invocation in self.store.list_invocations(
+                                run_id
+                            )
+                            if invocation["stage"] == stage
+                            and invocation["provider"] == provider_name
+                        ),
+                        None,
+                    )
+                    recovery_dispatched = bool(
+                        current_invocation is not None
+                        and int(current_invocation["call_count"])
+                        > recoverable[provider_name][3]
+                    )
                     recovery = {
                         "stage": stage,
                         "provider": provider_name,
                         "status": (
                             "recovered"
                             if provider_name in recovered_successes
-                            else "failed"
+                            else (
+                                "failed"
+                                if recovery_dispatched
+                                else "not_dispatched"
+                            )
                         ),
                         "initial_finish_reason": "length",
                         "initial_max_output_tokens": (
@@ -1365,6 +1874,10 @@ class CouncilEngine:
                             provider_name in failed_recovery_providers
                         ),
                     }
+                    if not recovery_dispatched:
+                        recovery["reason"] = (
+                            "recovery ended before provider dispatch"
+                        )
                     self.store.append_event(
                         run_id,
                         "truncation_recovery",
@@ -1372,6 +1885,153 @@ class CouncilEngine:
                     )
                     recoveries.append(recovery)
         return successes, failures, recoveries
+
+    def _execute_provider_call(
+        self,
+        *,
+        run_id: str,
+        stage: str,
+        provider_stage: str,
+        provider_name: str,
+        system_prompt: str,
+        user_prompt: str,
+        combined_prompt: str,
+        output_limit: int,
+        deadline: float,
+    ) -> _ProviderCallOutcome:
+        """Start one provider call only while the absolute run deadline is open."""
+
+        deadline_error = ProviderError(
+            "Run deadline exhausted",
+            category=ErrorCategory.TIMEOUT,
+            retryable=True,
+            ambiguous=False,
+        )
+        if time.monotonic() >= deadline:
+            return _ProviderCallOutcome(
+                invocation_id=None,
+                lease=None,
+                response=None,
+                error=deadline_error,
+                output_limit=output_limit,
+                dispatched=False,
+            )
+
+        provider = self.providers[provider_name]
+        invocation_id = self.store.start_invocation(
+            run_id=run_id,
+            stage=stage,
+            provider=provider_name,
+            model=provider.config.model,
+            lineage=provider.config.lineage,
+            prompt=combined_prompt,
+        )
+        invocation = self.store.get_invocation(invocation_id)
+        undispatched_attempts = sum(
+            1
+            for event in self.store.list_events(run_id)
+            if event["event_type"] == "provider_call_not_dispatched"
+            and isinstance(event.get("payload"), dict)
+            and event["payload"].get("stage") == stage
+            and event["payload"].get("provider") == provider_name
+        )
+        attempt = (
+            int(invocation.get("call_count") if invocation else 1)
+            + undispatched_attempts
+        )
+        lease: CallLease | None = None
+        try:
+            if self.call_gate is not None:
+                lease = self.call_gate.reserve(
+                    run_id=run_id,
+                    stage=stage,
+                    provider=provider.config,
+                    attempt=attempt,
+                )
+        except ProviderError as exc:
+            return _ProviderCallOutcome(
+                invocation_id=invocation_id,
+                lease=lease,
+                response=None,
+                error=exc,
+                output_limit=output_limit,
+                dispatched=False,
+                reservation_attempt=attempt,
+            )
+        except Exception as exc:
+            return _ProviderCallOutcome(
+                invocation_id=invocation_id,
+                lease=lease,
+                response=None,
+                error=ProviderError(
+                    "Provider dispatch failed safely: "
+                    f"{type(exc).__name__}",
+                    category=ErrorCategory.UNKNOWN,
+                    retryable=False,
+                    ambiguous=False,
+                ),
+                output_limit=output_limit,
+                dispatched=False,
+                reservation_attempt=attempt,
+            )
+
+        remaining_seconds = deadline - time.monotonic()
+        if remaining_seconds <= 0:
+            return _ProviderCallOutcome(
+                invocation_id=invocation_id,
+                lease=lease,
+                response=None,
+                error=deadline_error,
+                output_limit=output_limit,
+                dispatched=False,
+                reservation_attempt=attempt,
+            )
+        timeout_limit = min(
+            provider.config.timeout_for(provider_stage),
+            max(0.001, remaining_seconds),
+        )
+        try:
+            response = provider.generate(
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                stage=provider_stage,
+                max_output_tokens=output_limit,
+                timeout_seconds=timeout_limit,
+            )
+        except ProviderError as exc:
+            return _ProviderCallOutcome(
+                invocation_id=invocation_id,
+                lease=lease,
+                response=None,
+                error=exc,
+                output_limit=output_limit,
+                dispatched=True,
+                reservation_attempt=attempt,
+            )
+        except Exception as exc:  # defensive provider boundary
+            return _ProviderCallOutcome(
+                invocation_id=invocation_id,
+                lease=lease,
+                response=None,
+                error=ProviderError(
+                    f"Unexpected provider failure: {type(exc).__name__}",
+                    category=ErrorCategory.UNKNOWN,
+                    retryable=False,
+                    ambiguous=True,
+                ),
+                output_limit=output_limit,
+                dispatched=True,
+                reservation_attempt=attempt,
+            )
+        return _ProviderCallOutcome(
+            invocation_id=invocation_id,
+            lease=lease,
+            response=response,
+            error=None,
+            output_limit=output_limit,
+            dispatched=True,
+            reservation_attempt=attempt,
+        )
 
     @staticmethod
     def _is_length_failure_record(
@@ -1433,6 +2093,12 @@ class CouncilEngine:
         synthesis_provider = expected.pop(
             "synthesis_provider", self.synthesis_provider
         )
+        synthesis_fallbacks_value = expected.pop("synthesis_fallbacks", [])
+        if not isinstance(synthesis_fallbacks_value, list) or any(
+            not isinstance(name, str) for name in synthesis_fallbacks_value
+        ):
+            raise ValueError("Run synthesis fallback lock is malformed")
+        synthesis_fallbacks = tuple(synthesis_fallbacks_value)
         # Normalize older run locks through the parser so policy fields added
         # with backward-compatible defaults do not strand resumable runs.
         unknown_fields = set(expected) - set(RunPolicy().to_dict())
@@ -1442,9 +2108,11 @@ class CouncilEngine:
         if (
             expected_policy != self.policy.to_dict()
             or synthesis_provider != self.synthesis_provider
+            or synthesis_fallbacks != self.synthesis_fallbacks
         ):
             raise ValueError(
-                "Current policy or synthesis provider differs from the run lock"
+                "Current policy or synthesis provider chain differs from the "
+                "run lock"
             )
 
     @staticmethod
@@ -1729,6 +2397,7 @@ class CouncilEngine:
             for event in all_events
             if event["event_type"] == "truncation_recovery"
             and isinstance(event.get("payload"), dict)
+            and event["payload"].get("status") != "not_dispatched"
         }
         for event in all_events:
             if event["event_type"] != _PROVIDER_RETRY_EVENT:
@@ -1949,6 +2618,78 @@ class CouncilEngine:
             **error.to_dict(),
         }
 
+    def _synthesis_summary(
+        self,
+        invocations: list[dict[str, Any]],
+        failures: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        invocation_by_provider = {
+            str(invocation["provider"]): invocation
+            for invocation in invocations
+            if invocation["stage"] == "synthesis"
+            and invocation["provider"] in self.synthesis_providers
+        }
+        failure_by_provider = {
+            str(failure["provider"]): failure
+            for failure in failures
+            if failure.get("stage") == "synthesis"
+            and failure.get("provider") in self.synthesis_providers
+        }
+        attempts: list[dict[str, Any]] = []
+        selected_provider: str | None = None
+        selected_position: int | None = None
+        for position, provider_name in enumerate(
+            self.synthesis_providers,
+            start=1,
+        ):
+            invocation = invocation_by_provider.get(provider_name)
+            failure = failure_by_provider.get(provider_name)
+            attempt: dict[str, Any] = {
+                "position": position,
+                "provider": provider_name,
+            }
+            if invocation is not None and invocation["status"] == "succeeded":
+                attempt.update(
+                    {
+                        "status": "succeeded",
+                        "invocation_id": invocation["id"],
+                        "resolved_model": invocation.get("resolved_model")
+                        or invocation["model"],
+                        "call_count": int(invocation.get("call_count") or 1),
+                    }
+                )
+                if selected_provider is None:
+                    selected_provider = provider_name
+                    selected_position = position
+            elif invocation is not None:
+                ambiguous = bool(invocation.get("error_ambiguous"))
+                attempt.update(
+                    {
+                        "status": "ambiguous" if ambiguous else "failed",
+                        "invocation_id": invocation["id"],
+                        "category": invocation.get("error_category"),
+                        "ambiguous": ambiguous,
+                        "call_count": int(invocation.get("call_count") or 1),
+                    }
+                )
+            elif failure is not None:
+                attempt.update(
+                    {
+                        "status": "not_dispatched",
+                        "category": failure.get("category"),
+                        "ambiguous": bool(failure.get("ambiguous", False)),
+                    }
+                )
+            else:
+                attempt["status"] = "not_attempted"
+            attempts.append(attempt)
+        return {
+            "configured_order": list(self.synthesis_providers),
+            "selected_provider": selected_provider,
+            "selected_position": selected_position,
+            "attempts": attempts,
+        }
+
     def _build_result(
         self,
         *,
@@ -2011,6 +2752,7 @@ class CouncilEngine:
             },
             "question_sha256": hashlib.sha256(question.encode()).hexdigest(),
             "answer": answer,
+            "synthesis": self._synthesis_summary(invocations, failures),
             "aggregate": aggregate,
             "candidate_namespace": (
                 None
@@ -2027,7 +2769,8 @@ class CouncilEngine:
                     "artifact": proposal_artifacts.get(name),
                     **response.to_dict(),
                 }
-                for name, response in proposals.items()
+                for name in self.providers
+                if (response := proposals.get(name)) is not None
             ],
             "juries": jury_records,
             "failures": failures,

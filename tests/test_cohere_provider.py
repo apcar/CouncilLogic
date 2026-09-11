@@ -233,6 +233,58 @@ class CohereProviderTests(unittest.TestCase):
         self.assertNotIn("response_format", body)
         self.assertEqual(transport.timeouts, [23.5])
 
+    def test_proposal_schema_keeps_generation_limits_in_descriptions(
+        self,
+    ) -> None:
+        transport = SequenceTransport(
+            response(
+                {
+                    "id": "cohere-proposal-schema",
+                    "finish_reason": "COMPLETE",
+                    "message": {
+                        "role": "assistant",
+                        "content": [{"type": "text", "text": "{}"}],
+                    },
+                }
+            )
+        )
+        provider = CohereProvider(config(), "secret", client=client(transport))
+
+        provider.generate(
+            system_prompt="system",
+            user_prompt="question",
+            stage="proposal",
+        )
+
+        body = json.loads(transport.requests[0].data or b"{}")
+        schema = body["response_format"]["schema"]
+        self.assertTrue(
+            {"minLength", "maxLength", "maxItems"}.isdisjoint(
+                schema_keys(schema)
+            )
+        )
+        properties = schema["properties"]
+        self.assertIn(
+            "350 characters under the provider generation limit",
+            properties["outcome"]["description"],
+        )
+        self.assertIn(
+            "at most 3 items under the provider generation limit",
+            properties["evidence_and_reasoning"]["description"],
+        )
+        self.assertIn(
+            "180 characters under the provider generation limit",
+            properties["evidence_and_reasoning"]["items"]["description"],
+        )
+        self.assertIn(
+            "at most 2 items under the provider generation limit",
+            properties["uncertainty"]["description"],
+        )
+        self.assertIn(
+            "120 characters under the provider generation limit",
+            properties["uncertainty"]["items"]["description"],
+        )
+
     def test_length_completion_is_preserved_for_runner_recovery(self) -> None:
         for content_blocks in (
             [],
@@ -375,7 +427,10 @@ class CohereProviderTests(unittest.TestCase):
     def test_cohere_invalid_token_status_is_authentication(self) -> None:
         transport = SequenceTransport(
             response(
-                {"message": "invalid token"},
+                {
+                    "code": "invalid_api_key",
+                    "message": "invalid token",
+                },
                 {"x-request-id": "cohere-auth-failure"},
                 status=498,
             )
@@ -401,6 +456,11 @@ class CohereProviderTests(unittest.TestCase):
         self.assertEqual(caught.exception.request_id, "cohere-auth-failure")
         self.assertEqual(caught.exception.attempts, 1)
         self.assertFalse(caught.exception.retryable)
+        self.assertEqual(
+            caught.exception.provider_error_code,
+            "invalid_api_key",
+        )
+        self.assertIsNotNone(caught.exception.client_request_id)
         self.assertNotIn("invalid-secret", str(caught.exception))
 
 

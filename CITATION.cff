@@ -5,8 +5,9 @@ type: software
 authors:
   - family-names: "Greene"
     given-names: "Andrew"
-version: 0.3.0a1
-date-released: 2026-08-08
+# Prepared release metadata; publication is pending.
+version: 0.3.1a1
+date-released: 2026-09-11
 url: "https://github.com/apcar/CouncilLogic"
 repository-code: "https://github.com/apcar/CouncilLogic"
 license: AGPL-3.0-only

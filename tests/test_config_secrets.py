@@ -13,8 +13,11 @@ from model_council.config import (  # noqa: E402
     DEFAULT_MODELS,
     default_config,
     load_config,
+    mock_config,
+    validate_provider_config,
+    validate_run_policy,
 )
-from model_council.models import RunPolicy  # noqa: E402
+from model_council.models import ProviderConfig, RunPolicy  # noqa: E402
 from model_council.secrets import (  # noqa: E402
     ChainedSecretResolver,
     CommandSecretResolver,
@@ -64,6 +67,10 @@ class ConfigurationTests(unittest.TestCase):
             ],
         )
         self.assertEqual(config.policy.max_calls, 20)
+        self.assertEqual(
+            config.synthesis_providers,
+            ("openai", "anthropic", "gemini"),
+        )
         self.assertEqual(config.policy.max_parallel_calls, 5)
         self.assertEqual(config.policy.deadline_seconds, 900.0)
         self.assertEqual(config.policy.jury_repair_attempts, 1)
@@ -128,6 +135,9 @@ class ConfigurationTests(unittest.TestCase):
             ),
         )
 
+    def test_mock_configuration_keeps_single_synthesizer(self) -> None:
+        self.assertEqual(mock_config().synthesis_providers, ("mock-1",))
+
     def test_legacy_file_config_does_not_silently_enable_new_providers(
         self,
     ) -> None:
@@ -145,6 +155,7 @@ class ConfigurationTests(unittest.TestCase):
             self.assertEqual(config.policy.max_parallel_calls, 5)
             self.assertEqual(config.policy.deadline_seconds, 900.0)
             self.assertEqual(config.policy.jury_repair_attempts, 0)
+            self.assertEqual(config.synthesis_providers, ("openai",))
 
     def test_example_config_activates_seven_and_parks_upstage(self) -> None:
         config = load_config(PROJECT_ROOT / "council.example.toml")
@@ -162,6 +173,10 @@ class ConfigurationTests(unittest.TestCase):
             ],
         )
         self.assertEqual(config.policy.max_calls, 20)
+        self.assertEqual(
+            config.synthesis_providers,
+            ("openai", "anthropic", "gemini"),
+        )
         self.assertEqual(config.policy.max_parallel_calls, 5)
         self.assertEqual(config.policy.deadline_seconds, 900.0)
         self.assertEqual(config.policy.jury_repair_attempts, 1)
@@ -407,6 +422,121 @@ max_output_tokens = 0
 
             with self.assertRaisesRegex(ValueError, "max_output_tokens"):
                 load_config(path)
+
+    def test_rejects_nonfinite_deadline(self) -> None:
+        providers = default_config().providers
+        for deadline in (float("nan"), float("inf"), float("-inf")):
+            with self.subTest(deadline=deadline):
+                with self.assertRaisesRegex(ValueError, "deadline_seconds"):
+                    validate_run_policy(
+                        RunPolicy(deadline_seconds=deadline, max_calls=20),
+                        providers,
+                        synthesis_provider_count=3,
+                    )
+
+    def test_rejects_nonfinite_provider_timeouts(self) -> None:
+        base = default_config().providers[0]
+        for timeout in (float("nan"), float("inf"), float("-inf")):
+            with self.subTest(field="timeout_seconds", timeout=timeout):
+                provider = ProviderConfig(
+                    **{
+                        **base.to_dict(),
+                        "timeout_seconds": timeout,
+                    }
+                )
+                with self.assertRaisesRegex(ValueError, "timeout_seconds"):
+                    validate_provider_config(provider)
+
+            with self.subTest(
+                field="stage_timeout_seconds",
+                timeout=timeout,
+            ):
+                provider = ProviderConfig(
+                    **{
+                        **base.to_dict(),
+                        "stage_timeout_seconds": {
+                            **base.stage_timeout_seconds,
+                            "synthesis": timeout,
+                        },
+                    }
+                )
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "stage_timeout_seconds.synthesis",
+                ):
+                    validate_provider_config(provider)
+
+    def test_rejects_nonfinite_numeric_values_from_toml(self) -> None:
+        cases = {
+            "deadline_seconds": "[policy]\ndeadline_seconds = nan\n",
+            "timeout_seconds": (
+                "[providers.openai]\ntimeout_seconds = inf\n"
+            ),
+            "stage_timeout_seconds": (
+                "[providers.openai.stage_timeout_seconds]\n"
+                "synthesis = inf\n"
+            ),
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "config.toml"
+            for field, contents in cases.items():
+                with self.subTest(field=field):
+                    path.write_text(contents, encoding="utf-8")
+                    with self.assertRaisesRegex(ValueError, field):
+                        load_config(path)
+
+    def test_file_config_validates_ordered_synthesis_chain_and_budget(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "config.toml"
+            path.write_text(
+                """
+[run]
+synthesis_provider = "openai"
+synthesis_fallbacks = ["anthropic"]
+
+[policy]
+max_calls = 9
+""",
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ValueError, "Max calls"):
+                load_config(path)
+
+            path.write_text(
+                path.read_text(encoding="utf-8").replace(
+                    "max_calls = 9",
+                    "max_calls = 10",
+                ),
+                encoding="utf-8",
+            )
+            config = load_config(path)
+
+        self.assertEqual(
+            config.synthesis_providers,
+            ("openai", "anthropic"),
+        )
+
+    def test_rejects_duplicate_or_unavailable_synthesis_fallbacks(
+        self,
+    ) -> None:
+        cases = (
+            ("[\"openai\"]", "duplicates"),
+            ("[\"cohere\"]", "not enabled"),
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "config.toml"
+            for fallbacks, message in cases:
+                with self.subTest(fallbacks=fallbacks):
+                    path.write_text(
+                        "[run]\n"
+                        'synthesis_provider = "openai"\n'
+                        f"synthesis_fallbacks = {fallbacks}\n",
+                        encoding="utf-8",
+                    )
+                    with self.assertRaisesRegex(ValueError, message):
+                        load_config(path)
 
     def test_rejects_unknown_stage_limit(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

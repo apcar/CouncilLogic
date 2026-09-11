@@ -39,6 +39,14 @@ def _filled(prefix: str, length: int) -> str:
     return prefix + ("x" * (length - len(prefix)))
 
 
+def _is_utf8_encodable(value: str) -> bool:
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError:
+        return False
+    return True
+
+
 def maximum_proposal_artifact(label: str) -> dict[str, Any]:
     """Return a deterministic artifact at every protocol size boundary."""
 
@@ -71,14 +79,11 @@ def maximum_proposal_artifact(label: str) -> dict[str, Any]:
     }
 
 
-def estimate_workload(
+def _stage_prompt_chars(
     question: str,
-    provider_names: Iterable[str],
+    providers: tuple[str, ...],
     policy: RunPolicy,
-) -> dict[str, Any]:
-    """Project worst-case stage prompt growth before provider execution."""
-
-    providers = tuple(provider_names)
+) -> dict[str, int]:
     labels = [candidate_label(index) for index in range(len(providers))]
     artifacts = {
         label: maximum_proposal_artifact(label) for label in labels
@@ -145,55 +150,192 @@ def estimate_workload(
         "synthesis": synthesis_chars,
     }
     if policy.jury_repair_attempts:
+        # Repair accepts arbitrary surrounding text around one extractable
+        # decision-valid object. A NUL expands to six characters when the raw
+        # response is embedded in the outer JSON payload, so fill every byte
+        # outside the smallest useful object with NULs for a true upper bound.
         repair_value = {
-            "winner": labels[0],
-            "ranking": labels,
-            "confidence": "medium",
-            "abstain": False,
+            "winner": None,
+            "ranking": [],
+            "confidence": "low",
+            "abstain": True,
             "rationale": "",
             "material_disagreements": [],
             "verification_needed": [],
         }
-        repair_response = json.dumps(repair_value, ensure_ascii=False)
-        remaining = JURY_REPAIR_INPUT_MAX_CHARS - len(repair_response)
-        # Backslashes maximize the second JSON-serialization expansion when
-        # the raw response is embedded as untrusted repair data.
-        repair_value["rationale"] = (
-            "\\" * (remaining // 2) + "x" * (remaining % 2)
+        repair_object = json.dumps(
+            repair_value,
+            ensure_ascii=False,
+            separators=(",", ":"),
         )
-        repair_response = json.dumps(repair_value, ensure_ascii=False)
+        repair_response = (
+            "\0" * (JURY_REPAIR_INPUT_MAX_CHARS - len(repair_object))
+            + repair_object
+        )
         repair_system, repair_user, _decision = jury_repair_prompts(
             repair_response,
-            "x" * JURY_REPAIR_ERROR_MAX_CHARS,
+            "\0" * JURY_REPAIR_ERROR_MAX_CHARS,
             labels,
         )
         stage_prompt_chars["jury_repair"] = combined_prompt_chars(
             (repair_system, repair_user)
         )
+    return stage_prompt_chars
+
+
+def _plain_question_capacity(
+    question: str,
+    providers: tuple[str, ...],
+    policy: RunPolicy,
+    current_stage_chars: dict[str, int],
+) -> tuple[int | None, int | None, list[str]]:
+    """Return exact capacity for appended unescaped ASCII question text.
+
+    Prompt payloads JSON-escape arbitrary question content, so character count
+    alone cannot describe every possible future question. A plain ASCII
+    character has deterministic one-character growth. Verify that growth
+    against both a plain fixture and the supplied question before reporting
+    the capacity.
+    """
+
+    plain_one = _stage_prompt_chars("x", providers, policy)
+    plain_two = _stage_prompt_chars("xx", providers, policy)
+    appended = _stage_prompt_chars(question + "x", providers, policy)
+    if not (
+        plain_one.keys() == plain_two.keys() == current_stage_chars.keys()
+        and appended.keys() == current_stage_chars.keys()
+    ):
+        return None, None, []
+
+    growth = {
+        stage: plain_two[stage] - plain_one[stage]
+        for stage in plain_one
+    }
+    if any(
+        amount < 0
+        or appended[stage] - current_stage_chars[stage] != amount
+        for stage, amount in growth.items()
+    ):
+        return None, None, []
+
+    stage_capacities: dict[str, int | None] = {}
+    for stage, amount in growth.items():
+        if amount == 0:
+            stage_capacities[stage] = (
+                None
+                if plain_one[stage] <= policy.max_stage_prompt_chars
+                else 0
+            )
+            continue
+        fixed_chars = plain_one[stage] - amount
+        stage_capacities[stage] = max(
+            0,
+            (policy.max_stage_prompt_chars - fixed_chars) // amount,
+        )
+
+    bounded_stage_capacities = [
+        capacity
+        for capacity in stage_capacities.values()
+        if capacity is not None
+    ]
+    effective_maximum = min(
+        [policy.max_question_chars, *bounded_stage_capacities]
+    )
+    limiting_stages = sorted(
+        stage
+        for stage, capacity in stage_capacities.items()
+        if capacity is not None and capacity == effective_maximum
+    )
+
+    question_headroom = max(0, policy.max_question_chars - len(question))
+    for stage, amount in growth.items():
+        current_chars = current_stage_chars[stage]
+        if current_chars > policy.max_stage_prompt_chars:
+            question_headroom = 0
+        elif amount:
+            question_headroom = min(
+                question_headroom,
+                (policy.max_stage_prompt_chars - current_chars) // amount,
+            )
+    return effective_maximum, max(0, question_headroom), limiting_stages
+
+
+def estimate_workload(
+    question: str,
+    provider_names: Iterable[str],
+    policy: RunPolicy,
+    *,
+    synthesis_providers: Iterable[str] | None = None,
+) -> dict[str, Any]:
+    """Project worst-case stage prompt growth before provider execution."""
+
+    providers = tuple(provider_names)
+    synthesizers = tuple(
+        synthesis_providers
+        if synthesis_providers is not None
+        else providers[:1]
+    )
+    question_utf8_valid = _is_utf8_encodable(question)
+    stage_prompt_chars = _stage_prompt_chars(question, providers, policy)
     exceeded_stages = sorted(
         stage
         for stage, chars in stage_prompt_chars.items()
         if chars > policy.max_stage_prompt_chars
     )
+    (
+        effective_plain_question_max_chars,
+        plain_question_headroom_chars,
+        limiting_stages,
+    ) = _plain_question_capacity(
+        question,
+        providers,
+        policy,
+        stage_prompt_chars,
+    )
     return {
         "question_chars": len(question),
+        "question_utf8_valid": question_utf8_valid,
         "provider_count": len(providers),
+        "providers": list(providers),
+        "synthesis_provider": synthesizers[0] if synthesizers else None,
+        "synthesis_providers": list(synthesizers),
+        "mandatory_calls": len(providers) * 2 + len(synthesizers),
+        "recovery_call_capacity": max(
+            0,
+            policy.max_calls - len(providers) * 2 - len(synthesizers),
+        ),
         "stage_prompt_chars": stage_prompt_chars,
         "max_question_chars": policy.max_question_chars,
         "max_stage_prompt_chars": policy.max_stage_prompt_chars,
+        "limits": {
+            "question_chars": policy.max_question_chars,
+            "stage_prompt_chars": policy.max_stage_prompt_chars,
+        },
         "question_limit_exceeded": (
             len(question) > policy.max_question_chars
         ),
         "prompt_limit_exceeded_stages": exceeded_stages,
+        "limiting_stages": limiting_stages,
         "within_limits": (
-            len(question) <= policy.max_question_chars
+            question_utf8_valid
+            and len(question) <= policy.max_question_chars
             and not exceeded_stages
         ),
+        "effective_plain_question_max_chars": (
+            effective_plain_question_max_chars
+        ),
+        "plain_question_headroom_chars": plain_question_headroom_chars,
+        "plain_question_basis": "unescaped ASCII characters",
         "estimate_basis": "protocol-character-upper-bound",
     }
 
 
 def require_workload_within_limits(plan: dict[str, Any]) -> None:
+    if plan.get("question_utf8_valid") is False:
+        raise ValueError(
+            "Question contains Unicode surrogate code points and cannot "
+            "be encoded as UTF-8"
+        )
     if plan["question_limit_exceeded"]:
         raise ValueError(
             "Question is too large for the configured council workload: "

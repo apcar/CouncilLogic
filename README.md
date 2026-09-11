@@ -40,9 +40,9 @@ The fastest review path is to run the
 [security model](docs/SECURITY.md), [operations runbook](docs/OPERATIONS.md),
 and [research boundaries](docs/RESEARCH.md).
 
-This repository is a **public alpha (`0.3.0a1`)**, not a production service or
-a truth oracle. Multiple models can share the same error. Verify consequential
-claims against primary sources.
+This checkout prepares **public alpha (`0.3.1a1`)** for release; publication is
+pending. CouncilLogic remains experimental. Multiple models can share the same
+error. Verify consequential claims against primary sources.
 
 ## What is—and is not—new
 
@@ -83,8 +83,10 @@ See [Research](docs/RESEARCH.md).
 2. **Judge:** each participating lineage ranks relabeled candidates without
    provider attribution; structured responses are validated locally.
 3. **Aggregate:** deterministic Borda scoring combines valid juries.
-4. **Synthesize:** the selected lineage receives bounded candidates, the
-   aggregate, and compact vote records and writes the final answer.
+4. **Synthesize:** an ordered, run-locked provider chain receives bounded
+   candidates, the aggregate, and compact vote records. It stops at the first
+   completed response and preserves every slot outcome, fallback transition,
+   and recovery record.
 
 ```mermaid
 flowchart LR
@@ -92,7 +94,7 @@ flowchart LR
     G --> P["Independent proposals"]
     P --> J["Metadata-blind juries"]
     J --> A["Deterministic aggregate"]
-    A --> S["Bounded synthesis"]
+    A --> S["Bounded synthesis chain"]
     P --> R[("Durable local record")]
     J --> R
     A --> R
@@ -100,10 +102,13 @@ flowchart LR
     R --> O["Inspect · resume · export"]
 ```
 
-A default live run uses fifteen application-level calls: seven proposals,
-seven juries, and one synthesis. The frozen `0.2.0a1` mock-service profile
-remains a four-lineage, nine-call fixture. Successful work is persisted and
-reused on resume. The application does not give models tools, web access, code
+A clean default live run uses fifteen application-level calls: seven proposals,
+seven juries, and one OpenAI synthesis. If that synthesis fails, the locked
+chain can try Anthropic and then Gemini. The full graph reserves seventeen
+mandatory calls, leaving three recovery slots under the default 20-call ceiling.
+Mock mode and the frozen `0.2.0a1` mock-service profile remain four-lineage,
+nine-call fixtures with one synthesizer. Successful work is persisted and reused
+on resume. The application does not give models tools, web access, code
 execution, or model-initiated actions.
 
 ## Five-minute credential-free proof
@@ -122,6 +127,8 @@ python -m pip install -e .
 
 council --version
 council --mock --data-dir ./work/demo doctor
+council --mock plan \
+  --question "What controls must be in place before an AI agent receives write access to a consequential business workflow?"
 council --mock --data-dir ./work/demo run \
   --question "What controls must be in place before an AI agent receives write access to a consequential business workflow?" \
   --json
@@ -146,14 +153,19 @@ council --mock --data-dir ./work/demo export RUN_ID \
 ## Workload reliability
 
 - Before any provider call, deterministic preflight checks the question and
-  projected downstream prompt graph against locked policy bounds.
+  projected downstream prompt graph against locked policy bounds. `council plan`
+  exposes the limiting stage and remaining plain-ASCII question headroom without
+  credentials, storage access, or provider requests.
+- Provider proposal-generation targets sit below canonical local bounds,
+  leaving tolerance for drift while preserving strict local validation.
 - Proposal, jury, and synthesis calls have separate output and timeout limits;
   shared call, concurrency, deadline, and recovery budgets cap the whole run.
 - A known output-length truncation may receive one bounded retry. Ambiguous
   timeouts or connection loss are preserved and never retried automatically.
-- Jury prose repair cannot change decision fields, consume the synthesis
-  reserve, or trigger another repair. Any accepted repair makes the run
-  `degraded`, not silently successful.
+- Optional recovery preserves capacity for mandatory jury quorum and the full
+  synthesis chain. Jury prose repair cannot change decision fields or trigger
+  another repair. Any accepted repair or successful synthesis fallback makes
+  the run `degraded`.
 - Every terminal result exposes membership, failures, recoveries, projected and
   actual workload, call count, and `clean` or `degraded` completion quality.
 
@@ -178,8 +190,13 @@ export COHERE_API_KEY="..."
 
 council doctor
 council providers
+council plan --file ./work/private-question.md
 council run --question "Your decision question"
 ```
+
+`doctor` checks local storage and credential presence; it does not prove that
+the configured account can currently use each pinned model. A successful live
+canary is time-bound model-availability evidence.
 
 The default Qwen destination is Alibaba Model Studio's
 [Singapore/International endpoint](https://www.alibabacloud.com/help/en/model-studio/regions/).
@@ -216,7 +233,7 @@ a publication boundary, not a roadmap or availability claim.
 ## Experimental service boundary
 
 > [!WARNING]
-> The `0.3.0a1` package retains the frozen `0.2.0a1` HTTP service profile.
+> The `0.3.1a1` candidate retains the frozen `0.2.0a1` HTTP service profile.
 > It is **mock-only and loopback-only** and cannot construct live-provider
 > adapters. Do not bind it to a non-loopback address, place it behind a tunnel
 > or remote front door, enable either work principal, or use it for production

@@ -256,6 +256,11 @@ class CohereProvider(Provider):
                     request_id=exc.request_id,
                     attempts=exc.attempts,
                     ambiguous=exc.ambiguous,
+                    client_request_id=exc.client_request_id,
+                    elapsed_ms=exc.elapsed_ms,
+                    transport_phase=exc.transport_phase,
+                    timeout_subtype=exc.timeout_subtype,
+                    provider_error_code=exc.provider_error_code,
                 ) from None
             raise
         return self._parse(

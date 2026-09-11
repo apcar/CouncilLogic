@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import os
 import re
 import tomllib
@@ -113,6 +114,11 @@ class AppConfig:
     policy: RunPolicy
     synthesis_provider: str
     data_dir: Path
+    synthesis_fallbacks: tuple[str, ...] = ()
+
+    @property
+    def synthesis_providers(self) -> tuple[str, ...]:
+        return (self.synthesis_provider, *self.synthesis_fallbacks)
 
 
 def default_data_dir() -> Path:
@@ -178,12 +184,12 @@ def default_config() -> AppConfig:
             _default_provider(name)
             for name in DEFAULT_LIVE_PROVIDER_NAMES
         ),
-        # Seven clean participants require 15 calls. Preserve the previous
-        # five-call recovery margin rather than making the larger default
-        # topology consume the entire application-level budget.
+        # Seven participants plus three ordered synthesis attempts reserve
+        # 17 calls, leaving three application-level recovery calls.
         policy=RunPolicy(max_calls=20, jury_repair_attempts=1),
         synthesis_provider="openai",
         data_dir=default_data_dir(),
+        synthesis_fallbacks=("anthropic", "gemini"),
     )
 
 
@@ -217,7 +223,11 @@ def validate_provider_config(config: ProviderConfig) -> None:
         )
     if config.max_output_tokens < 1:
         raise ValueError(f"{config.name}: max_output_tokens must be positive")
-    if config.timeout_seconds <= 0:
+    if (
+        isinstance(config.timeout_seconds, bool)
+        or not math.isfinite(config.timeout_seconds)
+        or config.timeout_seconds <= 0
+    ):
         raise ValueError(f"{config.name}: timeout_seconds must be positive")
     if not 1 <= config.max_attempts <= 10:
         raise ValueError(f"{config.name}: max_attempts must be between 1 and 10")
@@ -232,7 +242,16 @@ def validate_provider_config(config: ProviderConfig) -> None:
                 f"{', '.join(sorted(unknown))}"
             )
         for stage, value in values.items():
-            if value <= 0:
+            if (
+                value <= 0
+                or (
+                    field_name == "stage_timeout_seconds"
+                    and (
+                        isinstance(value, bool)
+                        or not math.isfinite(value)
+                    )
+                )
+            ):
                 raise ValueError(
                     f"{config.name}: {field_name}.{stage} must be positive"
                 )
@@ -242,13 +261,18 @@ def validate_provider_config(config: ProviderConfig) -> None:
 def validate_run_policy(
     policy: RunPolicy,
     providers: tuple[ProviderConfig, ...] | list[ProviderConfig],
+    *,
+    synthesis_provider_count: int = 1,
 ) -> None:
     if not providers:
         raise ValueError("At least one provider must be enabled")
     for field_name in ("proposal_quorum", "jury_quorum", "min_lineages"):
         if getattr(policy, field_name) < 1:
             raise ValueError(f"{field_name} must be positive")
-    if policy.deadline_seconds <= 0:
+    if (
+        not math.isfinite(policy.deadline_seconds)
+        or policy.deadline_seconds <= 0
+    ):
         raise ValueError("deadline_seconds must be positive")
     if policy.max_parallel_calls < 1:
         raise ValueError("max_parallel_calls must be positive")
@@ -269,11 +293,34 @@ def validate_run_policy(
     lineage_count = len({provider.lineage for provider in providers})
     if policy.min_lineages > lineage_count:
         raise ValueError("Configured providers do not meet minimum lineage diversity")
-    required_calls = len(providers) * 2 + 1
+    if synthesis_provider_count < 1:
+        raise ValueError("At least one synthesis provider is required")
+    required_calls = len(providers) * 2 + synthesis_provider_count
     if policy.max_calls < required_calls:
         raise ValueError(
-            "Max calls is too small for proposals, juries, and synthesis"
+            "Max calls is too small for proposals, juries, and configured "
+            "synthesis attempts"
         )
+
+
+def validate_synthesis_providers(
+    synthesis_provider: str,
+    synthesis_fallbacks: tuple[str, ...] | list[str],
+    providers: tuple[ProviderConfig, ...] | list[ProviderConfig],
+) -> tuple[str, ...]:
+    chain = (synthesis_provider, *tuple(synthesis_fallbacks))
+    if any(not isinstance(name, str) or not name.strip() for name in chain):
+        raise ValueError("Synthesis provider names must be non-empty strings")
+    if len(set(chain)) != len(chain):
+        raise ValueError("Synthesis providers must not contain duplicates")
+    available = {provider.name for provider in providers}
+    unavailable = [name for name in chain if name not in available]
+    if unavailable:
+        raise ValueError(
+            "Configured synthesis providers are not enabled: "
+            + ", ".join(unavailable)
+        )
+    return chain
 
 
 def load_config(path: str | Path | None = None) -> AppConfig:
@@ -281,7 +328,16 @@ def load_config(path: str | Path | None = None) -> AppConfig:
     if path is None:
         for provider in base.providers:
             validate_provider_config(provider)
-        validate_run_policy(base.policy, base.providers)
+        validate_synthesis_providers(
+            base.synthesis_provider,
+            base.synthesis_fallbacks,
+            base.providers,
+        )
+        validate_run_policy(
+            base.policy,
+            base.providers,
+            synthesis_provider_count=len(base.synthesis_providers),
+        )
         return base
 
     config_path = Path(path).expanduser()
@@ -354,18 +410,29 @@ def load_config(path: str | Path | None = None) -> AppConfig:
     synthesis_provider = str(
         run_raw.get("synthesis_provider", base.synthesis_provider)
     )
+    raw_synthesis_fallbacks = run_raw.get("synthesis_fallbacks", [])
+    if not isinstance(raw_synthesis_fallbacks, list):
+        raise ValueError("run.synthesis_fallbacks must be an array")
+    synthesis_fallbacks = tuple(raw_synthesis_fallbacks)
     data_dir = Path(run_raw.get("data_dir", str(base.data_dir))).expanduser()
 
-    names = {provider.name for provider in providers}
-    if synthesis_provider not in names:
-        raise ValueError("Configured synthesis provider is not enabled")
-    validate_run_policy(policy, providers)
+    synthesis_chain = validate_synthesis_providers(
+        synthesis_provider,
+        synthesis_fallbacks,
+        providers,
+    )
+    validate_run_policy(
+        policy,
+        providers,
+        synthesis_provider_count=len(synthesis_chain),
+    )
 
     return AppConfig(
         providers=tuple(providers),
         policy=policy,
         synthesis_provider=synthesis_provider,
         data_dir=data_dir,
+        synthesis_fallbacks=synthesis_fallbacks,
     )
 
 
@@ -390,5 +457,14 @@ def mock_config(data_dir: str | Path | None = None) -> AppConfig:
     )
     for provider in config.providers:
         validate_provider_config(provider)
-    validate_run_policy(config.policy, config.providers)
+    validate_synthesis_providers(
+        config.synthesis_provider,
+        config.synthesis_fallbacks,
+        config.providers,
+    )
+    validate_run_policy(
+        config.policy,
+        config.providers,
+        synthesis_provider_count=len(config.synthesis_providers),
+    )
     return config

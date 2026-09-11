@@ -15,6 +15,7 @@ from .config import (
     mock_config,
     validate_provider_config,
     validate_run_policy,
+    validate_synthesis_providers,
 )
 from .engine import CouncilEngine
 from .models import ProviderConfig, RunPolicy
@@ -23,6 +24,55 @@ from .run_lock import ServiceLock
 from .secrets import SecretResolver, default_secret_resolver
 from .store import CouncilStore, service_managed_data_dir
 from .version import PACKAGE_VERSION
+from .workload import estimate_workload, require_workload_within_limits
+
+
+_RUN_POLICY_OVERRIDES = (
+    "proposal_quorum",
+    "jury_quorum",
+    "min_lineages",
+    "max_calls",
+    "max_parallel_calls",
+    "deadline_seconds",
+    "max_question_chars",
+    "max_stage_prompt_chars",
+    "jury_repair_attempts",
+    "truncation_retries",
+    "max_recovery_output_tokens",
+)
+
+
+def _add_question_arguments(parser: argparse.ArgumentParser) -> None:
+    input_group = parser.add_mutually_exclusive_group(required=True)
+    input_group.add_argument("--question", help="Question for the council")
+    input_group.add_argument("--file", help="UTF-8 file containing the question")
+
+
+def _add_run_selection_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--providers",
+        help="Comma-separated provider names; defaults to all configured providers",
+    )
+    synthesis_group = parser.add_mutually_exclusive_group()
+    synthesis_group.add_argument(
+        "--synthesis-provider",
+        help="Use one provider for synthesis with no fallback",
+    )
+    synthesis_group.add_argument(
+        "--synthesis-providers",
+        help="Comma-separated synthesis providers in exact fallback order",
+    )
+    parser.add_argument("--proposal-quorum", type=int)
+    parser.add_argument("--jury-quorum", type=int)
+    parser.add_argument("--min-lineages", type=int)
+    parser.add_argument("--max-calls", type=int)
+    parser.add_argument("--max-parallel-calls", type=int)
+    parser.add_argument("--deadline-seconds", type=float)
+    parser.add_argument("--max-question-chars", type=int)
+    parser.add_argument("--max-stage-prompt-chars", type=int)
+    parser.add_argument("--jury-repair-attempts", type=int)
+    parser.add_argument("--truncation-retries", type=int)
+    parser.add_argument("--max-recovery-output-tokens", type=int)
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -59,26 +109,17 @@ def _parser() -> argparse.ArgumentParser:
     )
     providers.add_argument("--json", action="store_true")
 
-    run = subparsers.add_parser("run", help="Start a new council run")
-    input_group = run.add_mutually_exclusive_group(required=True)
-    input_group.add_argument("--question", help="Question for the council")
-    input_group.add_argument("--file", help="UTF-8 file containing the question")
-    run.add_argument(
-        "--providers",
-        help="Comma-separated provider names; defaults to all configured providers",
+    plan = subparsers.add_parser(
+        "plan",
+        help="Project a council workload without credentials, storage, or API calls",
     )
-    run.add_argument("--synthesis-provider")
-    run.add_argument("--proposal-quorum", type=int)
-    run.add_argument("--jury-quorum", type=int)
-    run.add_argument("--min-lineages", type=int)
-    run.add_argument("--max-calls", type=int)
-    run.add_argument("--max-parallel-calls", type=int)
-    run.add_argument("--deadline-seconds", type=float)
-    run.add_argument("--max-question-chars", type=int)
-    run.add_argument("--max-stage-prompt-chars", type=int)
-    run.add_argument("--jury-repair-attempts", type=int)
-    run.add_argument("--truncation-retries", type=int)
-    run.add_argument("--max-recovery-output-tokens", type=int)
+    _add_question_arguments(plan)
+    _add_run_selection_arguments(plan)
+    plan.add_argument("--json", action="store_true")
+
+    run = subparsers.add_parser("run", help="Start a new council run")
+    _add_question_arguments(run)
+    _add_run_selection_arguments(run)
     run.add_argument("--idempotency-key")
     run.add_argument("--json", action="store_true")
 
@@ -118,12 +159,15 @@ def _select_run_config(
     config: AppConfig, args: argparse.Namespace
 ) -> AppConfig:
     providers = list(config.providers)
-    if getattr(args, "providers", None):
+    provider_selection = getattr(args, "providers", None)
+    if provider_selection:
         requested = [
             item.strip()
-            for item in args.providers.split(",")
+            for item in provider_selection.split(",")
             if item.strip()
         ]
+        if len(set(requested)) != len(requested):
+            raise ValueError("Selected providers must not contain duplicates")
         available = {provider.name: provider for provider in providers}
         unknown = [name for name in requested if name not in available]
         if unknown:
@@ -131,37 +175,71 @@ def _select_run_config(
         providers = [available[name] for name in requested]
 
     policy_values = config.policy.to_dict()
-    for field in (
-        "proposal_quorum",
-        "jury_quorum",
-        "min_lineages",
-        "max_calls",
-        "max_parallel_calls",
-        "deadline_seconds",
-        "max_question_chars",
-        "max_stage_prompt_chars",
-        "jury_repair_attempts",
-        "truncation_retries",
-        "max_recovery_output_tokens",
-    ):
+    for field in _RUN_POLICY_OVERRIDES:
         value = getattr(args, field, None)
         if value is not None:
             policy_values[field] = value
     policy = type(config.policy).from_dict(policy_values)
-    synthesis_provider = (
-        getattr(args, "synthesis_provider", None)
-        or config.synthesis_provider
+    ordered_override = getattr(args, "synthesis_providers", None)
+    singular_override = getattr(args, "synthesis_provider", None)
+    if ordered_override is not None:
+        synthesis_chain = tuple(
+            item.strip()
+            for item in ordered_override.split(",")
+            if item.strip()
+        )
+        if not synthesis_chain:
+            raise ValueError("At least one synthesis provider is required")
+    elif singular_override is not None:
+        synthesis_chain = (singular_override,)
+    elif provider_selection and getattr(args, "config", None) is None:
+        selected_names = {provider.name for provider in providers}
+        if config.synthesis_provider not in selected_names:
+            raise ValueError(
+                "Synthesis provider must be one of the selected providers"
+            )
+        # The no-config fallback chain is an implicit default. Preserve the
+        # configured primary for compatibility with existing --providers
+        # commands, but do not force default fallbacks that the command
+        # explicitly removed from its participant roster. File-backed chains
+        # and explicit CLI chains remain exact and fail closed below.
+        synthesis_chain = tuple(
+            name
+            for name in config.synthesis_providers
+            if name in selected_names
+        )
+    else:
+        synthesis_chain = config.synthesis_providers
+    synthesis_provider = synthesis_chain[0]
+    synthesis_fallbacks = synthesis_chain[1:]
+    validated_chain = validate_synthesis_providers(
+        synthesis_provider,
+        synthesis_fallbacks,
+        providers,
     )
-    names = {provider.name for provider in providers}
-    if synthesis_provider not in names:
-        raise ValueError("Synthesis provider must be one of the selected providers")
-    validate_run_policy(policy, providers)
+    validate_run_policy(
+        policy,
+        providers,
+        synthesis_provider_count=len(validated_chain),
+    )
     return replace(
         config,
         providers=tuple(providers),
         policy=policy,
         synthesis_provider=synthesis_provider,
+        synthesis_fallbacks=synthesis_fallbacks,
     )
+
+
+def _question_from_args(args: argparse.Namespace) -> str:
+    if args.file:
+        question = Path(args.file).read_text(encoding="utf-8")
+    else:
+        question = args.question
+    clean_question = question.strip()
+    if not clean_question:
+        raise ValueError("Question cannot be empty")
+    return clean_question
 
 
 def _locked_resume_config(config: AppConfig, run_id: str) -> AppConfig:
@@ -182,17 +260,29 @@ def _locked_resume_config(config: AppConfig, run_id: str) -> AppConfig:
     for provider in providers:
         validate_provider_config(provider)
     policy = RunPolicy.from_dict(run["policy"])
-    validate_run_policy(policy, providers)
     synthesis_provider = str(
         run["policy"].get("synthesis_provider") or config.synthesis_provider
     )
-    if synthesis_provider not in {provider.name for provider in providers}:
-        raise ValueError("Stored synthesis provider is not available")
+    synthesis_fallbacks_value = run["policy"].get("synthesis_fallbacks", [])
+    if not isinstance(synthesis_fallbacks_value, list):
+        raise ValueError("Stored synthesis fallback lock is malformed")
+    synthesis_fallbacks = tuple(synthesis_fallbacks_value)
+    synthesis_chain = validate_synthesis_providers(
+        synthesis_provider,
+        synthesis_fallbacks,
+        providers,
+    )
+    validate_run_policy(
+        policy,
+        providers,
+        synthesis_provider_count=len(synthesis_chain),
+    )
     return replace(
         config,
         providers=providers,
         policy=policy,
         synthesis_provider=synthesis_provider,
+        synthesis_fallbacks=synthesis_fallbacks,
     )
 
 
@@ -243,6 +333,7 @@ def _engine(
         providers=_providers(config, resolver),
         policy=config.policy,
         synthesis_provider=config.synthesis_provider,
+        synthesis_fallbacks=config.synthesis_fallbacks,
     )
 
 
@@ -308,6 +399,49 @@ def _doctor(config: AppConfig, *, as_json: bool) -> int:
     return 0 if all_ready else 2
 
 
+def _print_workload_plan(plan: dict[str, Any], *, as_json: bool) -> None:
+    if as_json:
+        print(json.dumps(plan, indent=2, sort_keys=True))
+        return
+
+    providers = ", ".join(plan["providers"])
+    print(f"Providers ({plan['provider_count']}): {providers}")
+    print(
+        "Synthesis order: "
+        + " -> ".join(plan["synthesis_providers"])
+    )
+    print(
+        "Call plan: "
+        f"{plan['mandatory_calls']} mandatory; "
+        f"{plan['recovery_call_capacity']} recovery"
+    )
+    print(
+        f"Question chars: {plan['question_chars']} / "
+        f"{plan['max_question_chars']}"
+    )
+    print("Stage prompt chars:")
+    exceeded = set(plan["prompt_limit_exceeded_stages"])
+    for stage, chars in plan["stage_prompt_chars"].items():
+        marker = " [exceeds limit]" if stage in exceeded else ""
+        print(
+            f"  {stage}: {chars} / "
+            f"{plan['max_stage_prompt_chars']}{marker}"
+        )
+    print(f"Within limits: {'yes' if plan['within_limits'] else 'no'}")
+    limiting = ", ".join(plan["limiting_stages"]) or "none"
+    print(f"Limiting stages: {limiting}")
+    maximum = plan["effective_plain_question_max_chars"]
+    headroom = plan["plain_question_headroom_chars"]
+    print(
+        "Effective plain-question maximum: "
+        f"{maximum if maximum is not None else 'unavailable'}"
+    )
+    print(
+        "Plain-question headroom: "
+        f"{headroom if headroom is not None else 'unavailable'}"
+    )
+
+
 def _print_result(result: dict[str, Any], *, as_json: bool) -> None:
     if as_json:
         print(json.dumps(result, indent=2, sort_keys=True))
@@ -322,6 +456,16 @@ def _print_result(result: dict[str, Any], *, as_json: bool) -> None:
         print("\n" + result["answer"].strip())
     else:
         print("\nNo final synthesis was produced.")
+    synthesis = result.get("synthesis") or {}
+    if synthesis.get("configured_order"):
+        selected = synthesis.get("selected_provider") or "none"
+        print(f"\nSynthesizer selected: {selected}")
+        print("Synthesis attempts:")
+        for attempt in synthesis.get("attempts") or []:
+            print(
+                f"- {attempt['position']}. {attempt['provider']}: "
+                f"{attempt['status']}"
+            )
     if result.get("warnings"):
         print("\nWarnings:")
         for warning in result["warnings"]:
@@ -368,6 +512,12 @@ def _markdown_export(
         "",
         result.get("answer") or "_No final synthesis was produced._",
         "",
+        "## Synthesis selection",
+        "",
+        "```json",
+        json.dumps(result.get("synthesis"), indent=2, sort_keys=True),
+        "```",
+        "",
         "## Candidate namespace",
         "",
         "```json",
@@ -407,20 +557,73 @@ def _markdown_export(
         lines.append("_None._")
     lines.extend(["", "## Invocation record", ""])
     for invocation in invocations:
-        lines.extend(
+        attempts = invocation.get("attempts")
+        attempts_text = (
+            str(attempts)
+            if isinstance(attempts, int)
+            and not isinstance(attempts, bool)
+            and attempts >= 0
+            else "unknown"
+        )
+        latency_ms = invocation.get("latency_ms")
+        latency_text = (
+            f"{latency_ms} ms"
+            if isinstance(latency_ms, int)
+            and not isinstance(latency_ms, bool)
+            and latency_ms >= 0
+            else "unknown"
+        )
+        invocation_lines = [
+            f"### {invocation['stage']} — {invocation['provider']}",
+            "",
+            f"- Status: `{invocation['status']}`",
+            f"- Model: `{invocation['model']}`",
+            f"- Lineage: `{invocation['lineage']}`",
+            f"- Attempts: `{attempts_text}`",
+            f"- Latency: `{latency_text}`",
+        ]
+        if invocation["status"] == "failed":
+            category = invocation.get("error_category")
+            status_code = invocation.get("error_status_code")
+            retryable = invocation.get("error_retryable")
+            ambiguous = invocation.get("error_ambiguous")
+            category_text = (
+                category
+                if isinstance(category, str) and category
+                else "unknown"
+            )
+            status_code_text = (
+                str(status_code)
+                if isinstance(status_code, int)
+                and not isinstance(status_code, bool)
+                else "unknown"
+            )
+            retryable_text = (
+                str(retryable).lower()
+                if isinstance(retryable, bool)
+                else "unknown"
+            )
+            ambiguous_text = (
+                str(ambiguous).lower()
+                if isinstance(ambiguous, bool)
+                else "unknown"
+            )
+            invocation_lines.extend(
+                [
+                    f"- Failure category: `{category_text}`",
+                    f"- HTTP status: `{status_code_text}`",
+                    f"- Retryable: `{retryable_text}`",
+                    f"- Ambiguous: `{ambiguous_text}`",
+                ]
+            )
+        invocation_lines.extend(
             [
-                f"### {invocation['stage']} — {invocation['provider']}",
-                "",
-                f"- Status: `{invocation['status']}`",
-                f"- Model: `{invocation['model']}`",
-                f"- Lineage: `{invocation['lineage']}`",
-                f"- Attempts: `{invocation.get('attempts') or 0}`",
-                f"- Latency: `{invocation.get('latency_ms') or 0} ms`",
                 "",
                 invocation.get("response_text") or "_No response._",
                 "",
             ]
         )
+        lines.extend(invocation_lines)
     recovery_events = [
         event
         for event in events
@@ -430,6 +633,8 @@ def _markdown_export(
             "truncation_recovery",
             "jury_artifact_repair",
             "incomplete_response_preserved",
+            "provider_call_not_dispatched",
+            "synthesis_fallback_advanced",
         }
     ]
     lines.extend(["## Recovery audit events", ""])
@@ -519,12 +724,26 @@ def main(argv: Sequence[str] | None = None) -> int:
                         f"({item['lineage']})"
                     )
             return 0
+        if args.command == "plan":
+            config = _select_run_config(config, args)
+            question = _question_from_args(args)
+            plan = estimate_workload(
+                question,
+                (provider.name for provider in config.providers),
+                config.policy,
+                synthesis_providers=config.synthesis_providers,
+            )
+            _print_workload_plan(plan, as_json=args.json)
+            if not plan["within_limits"]:
+                try:
+                    require_workload_within_limits(plan)
+                except ValueError as exc:
+                    print(f"council: {exc}", file=sys.stderr)
+                return 2
+            return 0
         if args.command == "run":
             config = _select_run_config(config, args)
-            if args.file:
-                question = Path(args.file).read_text(encoding="utf-8")
-            else:
-                question = args.question
+            question = _question_from_args(args)
             result = _engine(config).run(
                 question, idempotency_key=args.idempotency_key
             )

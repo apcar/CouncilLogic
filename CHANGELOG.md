@@ -4,7 +4,57 @@ All notable public changes to CouncilLogic are recorded here.
 
 ## Unreleased
 
-No public changes yet.
+No changes beyond the prepared `0.3.1a1` candidate.
+
+## [0.3.1a1] - 2026-09-11
+
+Prepared locally for release. Publication and current provider availability
+are not established by this candidate.
+
+### Added
+
+- Self-contained source archives include release metadata, example configuration,
+  public operations documentation, and the mock validation script. CI runs the
+  test suite against the extracted archive as well as the checkout.
+- Offline `council plan` admission checks report projected stage sizes, the
+  limiting stage, effective plain-ASCII question capacity and remaining
+  headroom, synthesis order, mandatory call reservations, and recovery capacity
+  without resolving credentials, opening run storage, or contacting providers.
+- An ordered, run-locked synthesis chain with per-slot outcomes, fallback
+  transitions, and recovery records. The no-config live default tries OpenAI,
+  Anthropic, then Gemini and stops at the first completed synthesis response;
+  a fallback completion is degraded.
+
+### Changed
+
+- Recovery preserves mandatory jury quorum and the full remaining synthesis
+  chain. The default seven-provider graph reserves seventeen mandatory calls
+  and three recovery slots under the 20-call ceiling; a healthy run still uses
+  fifteen calls. Existing file-backed configurations that omit synthesis
+  fallbacks keep their single-provider chain.
+- Cooperative deadlines are finite and positive, checked before invocation
+  creation and dispatch, and cap the dispatched adapter timeout at the time
+  remaining. Work that expires while queued remains recorded as undispatched.
+- Resume reconstructs the stored provider and ordered synthesis locks, honors
+  durable fallback transitions, and reuses completed work. Ambiguous calls
+  remain suppressed; eligible non-ambiguous failures retain bounded retries.
+- Protocol `1.2.2-beta` uses narrower provider-generation proposal targets while
+  retaining canonical local validation bounds.
+- Jury-repair prompt sizing now covers control-character expansion. Planning
+  accounts for JSON escaping when reporting headroom and rejects question text
+  that cannot be encoded as UTF-8 before a run is created.
+- Provider failure records retain normalized, allowlisted error codes and safe
+  request metadata while excluding raw provider error bodies and messages.
+  Markdown exports expose failed invocation details and preserve undispatched,
+  recovery, and synthesis-transition audit records.
+
+### Boundaries
+
+- The mock-only, loopback-only service remains frozen at `0.2.0a1`, with four
+  deterministic lineages and nine logical calls. This candidate adds no hosted
+  service or public deployment.
+- Local tests establish software behavior. They do not establish current model
+  access, broad live-provider reliability, or improved decision quality.
 
 ## [0.3.0a1] - 2026-08-08
 
@@ -154,5 +204,6 @@ Initial public alpha.
   a counsel-reviewed contributor license agreement is available.
 
 [Unreleased]: https://github.com/apcar/CouncilLogic/compare/v0.3.0a1...HEAD
+[0.3.1a1]: #031a1---2026-09-11
 [0.3.0a1]: https://github.com/apcar/CouncilLogic/releases/tag/v0.3.0a1
 [0.2.0a1]: https://github.com/apcar/CouncilLogic/tree/v0.2.0a1

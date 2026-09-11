@@ -817,6 +817,16 @@ class CouncilServiceLifecycleTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "live-mode"):
                 CouncilApplication(temporary)
 
+    def test_service_rejects_ordered_synthesis_fallbacks(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            config = replace(
+                mock_config(temporary),
+                synthesis_fallbacks=("mock-2",),
+            )
+
+            with self.assertRaisesRegex(ValueError, "exactly one"):
+                CouncilApplication(temporary, config=config)
+
     def test_service_rejects_preexisting_unowned_mock_run_without_marking(
         self,
     ) -> None:

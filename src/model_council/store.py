@@ -886,6 +886,254 @@ class CouncilStore:
                 ),
             )
 
+    def release_undispatched_invocation(
+        self,
+        invocation_id: str,
+        error: ProviderError,
+        *,
+        reservation_attempt: int,
+        prior_invocation: dict[str, Any] | None = None,
+    ) -> None:
+        """Audit a non-dispatch and restore the preceding durable slot state."""
+
+        if not isinstance(error, ProviderError):
+            raise TypeError("error must be ProviderError")
+        if error.ambiguous:
+            raise ValueError("undispatched invocation error must be unambiguous")
+        if (
+            not isinstance(reservation_attempt, int)
+            or isinstance(reservation_attempt, bool)
+            or reservation_attempt < 1
+        ):
+            raise ValueError("reservation_attempt must be a positive integer")
+        error_value = error.to_dict()
+        _assert_no_credentials(error_value, "$.provider_error")
+        now = _utc_now()
+
+        with self._write_transaction() as connection:
+            row = connection.execute(
+                "SELECT * FROM invocations WHERE id = ?",
+                (invocation_id,),
+            ).fetchone()
+            if row is None:
+                raise KeyError(f"unknown invocation: {invocation_id}")
+            if row["status"] != "running":
+                raise RuntimeError(
+                    "only a running invocation can be released as undispatched"
+                )
+            attempted_call_count = int(row["call_count"])
+            if reservation_attempt < attempted_call_count:
+                raise ValueError(
+                    "reservation_attempt precedes the logical call count"
+                )
+
+            retry_event_id: int | None = None
+            retry_kind: str | None = None
+            prior_failure: dict[str, Any] | None = None
+            restored_call_count = 0
+            if prior_invocation is None:
+                if attempted_call_count != 1:
+                    raise RuntimeError(
+                        "a retried invocation requires its prior failed state"
+                    )
+            else:
+                if not isinstance(prior_invocation, dict):
+                    raise TypeError("prior_invocation must be a dict")
+                immutable_fields = (
+                    "id",
+                    "run_id",
+                    "stage",
+                    "provider",
+                    "model",
+                    "lineage",
+                    "prompt_text",
+                    "prompt_sha256",
+                )
+                if any(
+                    prior_invocation.get(field) != row[field]
+                    for field in immutable_fields
+                ):
+                    raise ValueError(
+                        "prior invocation does not match the running slot"
+                    )
+                restored_call_count = prior_invocation.get("call_count")
+                if (
+                    prior_invocation.get("status") != "failed"
+                    or not isinstance(restored_call_count, int)
+                    or isinstance(restored_call_count, bool)
+                    or restored_call_count < 1
+                    or restored_call_count + 1 != attempted_call_count
+                ):
+                    raise ValueError(
+                        "prior invocation is not the immediately preceding "
+                        "failed state"
+                    )
+                prior_failure_value = prior_invocation.get("error")
+                if not isinstance(prior_failure_value, dict):
+                    raise ValueError("prior invocation failure is malformed")
+                prior_failure = dict(prior_failure_value)
+                _assert_no_credentials(prior_failure, "$.prior_failure")
+                if (
+                    prior_invocation.get("error_ambiguous") is not False
+                    or prior_failure.get("ambiguous") is not False
+                    or prior_invocation.get("error_message")
+                    != prior_failure.get("message")
+                    or prior_invocation.get("error_category")
+                    != prior_failure.get("category")
+                    or prior_invocation.get("error_retryable")
+                    != prior_failure.get("retryable")
+                    or prior_invocation.get("error_status_code")
+                    != prior_failure.get("status_code")
+                    or prior_invocation.get("request_id")
+                    != prior_failure.get("request_id")
+                    or prior_invocation.get("attempts")
+                    != prior_failure.get("attempts")
+                ):
+                    raise ValueError(
+                        "prior invocation failure fields are inconsistent"
+                    )
+                matching_retry_events: list[tuple[int, dict[str, Any]]] = []
+                for retry_row in connection.execute(
+                    """
+                    SELECT id, payload_json FROM events
+                    WHERE run_id = ? AND event_type = 'provider_retry_started'
+                    ORDER BY id
+                    """,
+                    (str(row["run_id"]),),
+                ).fetchall():
+                    payload = _decode_json(retry_row["payload_json"], None)
+                    if (
+                        isinstance(payload, dict)
+                        and payload.get("stage") == row["stage"]
+                        and payload.get("provider") == row["provider"]
+                        and payload.get("retry_call_count")
+                        == attempted_call_count
+                    ):
+                        matching_retry_events.append(
+                            (int(retry_row["id"]), payload)
+                        )
+                if len(matching_retry_events) != 1:
+                    raise RuntimeError(
+                        "undispatched retry has no unique retry audit event"
+                    )
+                retry_event_id, retry_payload = matching_retry_events[0]
+                if retry_payload.get("prior_failure") != prior_failure:
+                    raise ValueError(
+                        "retry audit does not match the prior invocation"
+                    )
+                retry_kind_value = retry_payload.get("retry_kind")
+                if retry_kind_value not in {"application", "truncation"}:
+                    raise ValueError("retry audit kind is invalid")
+                retry_kind = str(retry_kind_value)
+
+            event_value = {
+                "version": 1,
+                "invocation_id": str(row["id"]),
+                "stage": str(row["stage"]),
+                "provider": str(row["provider"]),
+                "model": str(row["model"]),
+                "lineage": str(row["lineage"]),
+                "prompt_sha256": str(row["prompt_sha256"]),
+                "reservation_attempt": reservation_attempt,
+                "attempted_call_count": attempted_call_count,
+                "restored_call_count": restored_call_count,
+                "retry_kind": retry_kind,
+                "prior_failure": prior_failure,
+                "error": error_value,
+            }
+            _assert_no_credentials(event_value, "$.undispatched_call")
+            event_json = _canonical_json(event_value)
+            connection.execute(
+                """
+                INSERT INTO events (
+                    run_id, event_type, payload_json, payload_sha256, created_at
+                ) VALUES (?, 'provider_call_not_dispatched', ?, ?, ?)
+                """,
+                (
+                    str(row["run_id"]),
+                    event_json,
+                    _sha256_text(event_json),
+                    now,
+                ),
+            )
+            if prior_invocation is None:
+                cursor = connection.execute(
+                    """
+                    DELETE FROM invocations
+                    WHERE id = ? AND status = 'running' AND call_count = 1
+                    """,
+                    (invocation_id,),
+                )
+                if cursor.rowcount != 1:
+                    raise RuntimeError(
+                        "undispatched invocation changed concurrently"
+                    )
+                return
+
+            assert retry_event_id is not None
+            connection.execute(
+                "DELETE FROM events WHERE id = ?",
+                (retry_event_id,),
+            )
+            response_value = prior_invocation.get("response")
+            usage_value = prior_invocation.get("usage")
+            metadata_value = prior_invocation.get("metadata")
+            cursor = connection.execute(
+                """
+                UPDATE invocations
+                SET status = 'failed', response_text = ?,
+                    response_sha256 = ?, response_json = ?,
+                    resolved_model = ?, request_id = ?, usage_json = ?,
+                    latency_ms = ?, attempts = ?, finish_reason = ?,
+                    metadata_json = ?, error_category = ?,
+                    error_message = ?, error_retryable = ?,
+                    error_status_code = ?, error_ambiguous = ?,
+                    error_json = ?, call_count = ?, started_at = ?,
+                    updated_at = ?, finished_at = ?
+                WHERE id = ? AND status = 'running' AND call_count = ?
+                """,
+                (
+                    prior_invocation.get("response_text"),
+                    prior_invocation.get("response_sha256"),
+                    (
+                        None
+                        if response_value is None
+                        else _canonical_json(response_value)
+                    ),
+                    prior_invocation.get("resolved_model"),
+                    prior_invocation.get("request_id"),
+                    (
+                        None
+                        if not usage_value
+                        else _canonical_json(usage_value)
+                    ),
+                    prior_invocation.get("latency_ms"),
+                    prior_invocation.get("attempts"),
+                    prior_invocation.get("finish_reason"),
+                    (
+                        None
+                        if not metadata_value
+                        else _canonical_json(metadata_value)
+                    ),
+                    prior_invocation.get("error_category"),
+                    prior_invocation.get("error_message"),
+                    int(bool(prior_invocation.get("error_retryable"))),
+                    prior_invocation.get("error_status_code"),
+                    int(bool(prior_invocation.get("error_ambiguous"))),
+                    _canonical_json(prior_failure),
+                    restored_call_count,
+                    prior_invocation.get("started_at"),
+                    prior_invocation.get("updated_at"),
+                    prior_invocation.get("finished_at"),
+                    invocation_id,
+                    attempted_call_count,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise RuntimeError(
+                    "undispatched retry changed concurrently"
+                )
+
     @staticmethod
     def _invocation_from_row(row: sqlite3.Row) -> dict[str, Any]:
         return {

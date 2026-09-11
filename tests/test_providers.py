@@ -319,7 +319,7 @@ class ParsingTests(unittest.TestCase):
         parsed = provider.generate(
             system_prompt="system",
             user_prompt="question",
-            stage="jury",
+            stage="proposal",
         )
 
         self.assertEqual(parsed.content, "Grok answer")
@@ -332,6 +332,23 @@ class ParsingTests(unittest.TestCase):
         self.assertEqual(body["model"], "grok-4.5")
         self.assertEqual(body["reasoning"], {"effort": "low"})
         self.assertEqual(body["text"]["format"]["type"], "json_schema")
+        proposal_schema = body["text"]["format"]["schema"]
+        self.assertEqual(
+            proposal_schema["properties"]["outcome"]["maxLength"],
+            350,
+        )
+        self.assertEqual(
+            proposal_schema["properties"]["evidence_and_reasoning"][
+                "maxItems"
+            ],
+            3,
+        )
+        self.assertEqual(
+            proposal_schema["properties"]["evidence_and_reasoning"][
+                "items"
+            ]["maxLength"],
+            180,
+        )
         self.assertNotIn("xai-secret", json.dumps(body))
         self.assertEqual(
             transport.requests[0].get_header("Authorization"),
@@ -436,35 +453,35 @@ class ParsingTests(unittest.TestCase):
             if stage == "proposal":
                 properties = schema["properties"]
                 self.assertIn(
-                    "600 characters",
+                    "350 characters under the provider generation limit",
                     properties["outcome"]["description"],
                 )
                 self.assertIn(
-                    "Must contain at most 4 items",
+                    "Must contain at most 3 items",
                     properties["evidence_and_reasoning"][
                         "description"
                     ],
                 )
                 self.assertIn(
-                    "350 characters",
+                    "180 characters under the provider generation limit",
                     properties["evidence_and_reasoning"]["items"][
                         "description"
                     ],
                 )
                 self.assertIn(
-                    "Must contain at most 3 items",
+                    "Must contain at most 2 items",
                     properties["uncertainty"]["description"],
                 )
                 self.assertIn(
-                    "280 characters",
+                    "120 characters under the provider generation limit",
                     properties["uncertainty"]["items"]["description"],
                 )
                 self.assertIn(
-                    "Must contain at most 4 items",
+                    "Must contain at most 3 items",
                     properties["verification_needed"]["description"],
                 )
                 self.assertIn(
-                    "280 characters",
+                    "120 characters under the provider generation limit",
                     properties["verification_needed"]["items"][
                         "description"
                     ],
@@ -878,6 +895,7 @@ class RetryAndErrorTests(unittest.TestCase):
                 elapsed_ms=321,
                 transport_phase="response_read",
                 timeout_subtype="fixture_timeout",
+                provider_error_code="MODEL_NOT_FOUND",
             )
         )
 
@@ -896,6 +914,178 @@ class RetryAndErrorTests(unittest.TestCase):
         self.assertEqual(error.elapsed_ms, 321)
         self.assertEqual(error.transport_phase, "response_read")
         self.assertEqual(error.timeout_subtype, "fixture_timeout")
+        self.assertEqual(error.provider_error_code, "model_not_found")
+
+    def test_http_error_preserves_only_safe_structured_diagnostics(
+        self,
+    ) -> None:
+        cases = (
+            (
+                {"error": {"code": "model_not_found"}},
+                "model_not_found",
+            ),
+            (
+                {"error": {"type": "unsupported_parameter"}},
+                "unsupported_parameter",
+            ),
+            (
+                {"code": "CONTEXT_LENGTH_EXCEEDED"},
+                "context_length_exceeded",
+            ),
+        )
+        for body, expected_code in cases:
+            with self.subTest(expected_code=expected_code):
+                secret = f"secret-message-for-{expected_code}"
+                body["message"] = secret
+                transport = SequenceTransport(
+                    response(400, body, {"x-request-id": "provider-req"})
+                )
+
+                with self.assertRaises(ProviderError) as caught:
+                    client(transport).post_json(
+                        url="https://api.example.test/generate",
+                        headers={
+                            "x-client-request-id": "caller-supplied-id"
+                        },
+                        payload={},
+                        timeout_seconds=2,
+                        max_attempts=1,
+                    )
+
+                error = caught.exception
+                request_headers = {
+                    key.casefold(): value
+                    for key, value in transport.requests[0].header_items()
+                }
+                self.assertEqual(
+                    error.provider_error_code,
+                    expected_code,
+                )
+                self.assertEqual(error.request_id, "provider-req")
+                self.assertEqual(
+                    error.client_request_id,
+                    request_headers["x-client-request-id"],
+                )
+                self.assertNotEqual(
+                    error.client_request_id,
+                    "caller-supplied-id",
+                )
+                serialized = json.dumps(error.to_dict())
+                self.assertNotIn(secret, serialized)
+                self.assertNotIn("message-for", serialized)
+
+    def test_http_error_preserves_canonical_gemini_statuses(self) -> None:
+        statuses = (
+            "INVALID_ARGUMENT",
+            "RESOURCE_EXHAUSTED",
+            "UNAUTHENTICATED",
+            "PERMISSION_DENIED",
+            "NOT_FOUND",
+            "DEADLINE_EXCEEDED",
+            "INTERNAL",
+            "UNAVAILABLE",
+        )
+        for status in statuses:
+            with self.subTest(status=status):
+                secret = f"secret-message-for-{status}"
+                transport = SequenceTransport(
+                    response(
+                        400,
+                        {
+                            "error": {
+                                "code": 400,
+                                "message": secret,
+                                "status": status,
+                            }
+                        },
+                    )
+                )
+
+                with self.assertRaises(ProviderError) as caught:
+                    client(transport).post_json(
+                        url="https://api.example.test/generate",
+                        headers={},
+                        payload={},
+                        timeout_seconds=2,
+                        max_attempts=1,
+                    )
+
+                self.assertEqual(
+                    caught.exception.provider_error_code,
+                    status.casefold(),
+                )
+                self.assertNotIn(
+                    secret,
+                    json.dumps(caught.exception.to_dict()),
+                )
+
+    def test_http_error_discards_unknown_or_oversized_codes(self) -> None:
+        secret = "unknown-code-must-not-be-persisted"
+        for unsafe_code in (secret, "x" * 65):
+            with self.subTest(code=unsafe_code):
+                transport = SequenceTransport(
+                    response(
+                        400,
+                        {
+                            "error": {
+                                "code": unsafe_code,
+                                "message": secret,
+                            }
+                        },
+                    )
+                )
+
+                with self.assertRaises(ProviderError) as caught:
+                    client(transport).post_json(
+                        url="https://api.example.test/generate",
+                        headers={},
+                        payload={},
+                        timeout_seconds=2,
+                        max_attempts=1,
+                    )
+
+                self.assertIsNone(caught.exception.provider_error_code)
+                self.assertNotIn(
+                    secret,
+                    json.dumps(caught.exception.to_dict()),
+                )
+
+    def test_pathological_error_json_keeps_http_classification(self) -> None:
+        secret = b"provider-message-must-not-be-persisted"
+        body = (
+            b'{"error":{"code":'
+            + (b"1" * 5_000)
+            + b',"message":"'
+            + secret
+            + b'"}}'
+        )
+        transport = SequenceTransport(
+            response(
+                503,
+                body,
+                {"x-request-id": "pathological-body-request"},
+            )
+        )
+
+        with self.assertRaises(ProviderError) as caught:
+            client(transport).post_json(
+                url="https://api.example.test/generate",
+                headers={},
+                payload={},
+                timeout_seconds=2,
+                max_attempts=1,
+            )
+
+        error = caught.exception
+        self.assertEqual(error.category, ErrorCategory.PROVIDER_SERVER)
+        self.assertEqual(error.status_code, 503)
+        self.assertEqual(error.request_id, "pathological-body-request")
+        self.assertFalse(error.ambiguous)
+        self.assertIsNone(error.provider_error_code)
+        self.assertNotIn(
+            secret.decode(),
+            json.dumps(error.to_dict()),
+        )
 
     def test_connection_error_does_not_persist_raw_exception_text(self) -> None:
         secret = "transport-secret-must-not-leak"
@@ -940,6 +1130,7 @@ class RetryAndErrorTests(unittest.TestCase):
         self.assertEqual(error.category, ErrorCategory.AUTHENTICATION)
         self.assertFalse(error.retryable)
         self.assertEqual(error.request_id, "auth_req")
+        self.assertIsNotNone(error.client_request_id)
         self.assertNotIn(secret, str(error))
         self.assertNotIn(secret, json.dumps(error.to_dict()))
         self.assertEqual(len(transport.requests), 1)
