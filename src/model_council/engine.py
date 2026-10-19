@@ -20,6 +20,9 @@ from .protocol import (
     PROTOCOL_VERSION,
     aggregate_juries,
     candidate_label,
+    check_synthesis_outcome,
+    new_untrusted_marker,
+    self_vote_report,
     jury_prompts,
     jury_repair_prompts,
     parse_jury,
@@ -43,6 +46,7 @@ _CANDIDATE_NAMESPACE_VERSION = 1
 _ADJUDICATION_EVENT = "adjudication_locked"
 _ADJUDICATION_VERSION = 1
 _JURY_REPAIR_EVENT = "jury_artifact_repair"
+_UNTRUSTED_MARKER_EVENT = "untrusted_marker"
 _PROVIDER_RETRY_EVENT = "provider_retry_started"
 _SYNTHESIS_FALLBACK_EVENT = "synthesis_fallback_advanced"
 _SYNTHESIS_FALLBACK_VERSION = 1
@@ -96,6 +100,8 @@ class _ProviderCallOutcome:
 
 
 class CouncilEngine:
+    _untrusted_marker: str | None = None
+
     def __init__(
         self,
         *,
@@ -216,6 +222,9 @@ class CouncilEngine:
         )
         if run.get("status") == "completed" and run.get("result"):
             return run["result"]
+        self._untrusted_marker = self._load_or_create_untrusted_marker(
+            run_id, existing_events
+        )
 
         started = time.monotonic()
         deadline = started + self.policy.deadline_seconds
@@ -260,7 +269,9 @@ class CouncilEngine:
                 for failure in namespace_lock["proposal_failures"]
             )
 
-        proposal_system, proposal_user = proposal_prompts(question)
+        proposal_system, proposal_user = proposal_prompts(
+            question, marker=self._untrusted_marker
+        )
         proposal_prompts_by_provider = {
             name: (proposal_system, proposal_user)
             for name in proposal_provider_names
@@ -370,7 +381,7 @@ class CouncilEngine:
                 }
                 jury_presentation_orders[juror_name] = presentation_order
                 jury_prompts_by_provider[juror_name] = jury_prompts(
-                    question, candidates
+                    question, candidates, marker=self._untrusted_marker
                 )
 
             jury_responses, jury_failures, jury_recoveries = (
@@ -476,6 +487,7 @@ class CouncilEngine:
                 synth_candidates,
                 anonymous_aggregate,
                 anonymous_juries,
+                marker=self._untrusted_marker,
             )
             for position, synthesis_name in enumerate(
                 self.synthesis_providers[current_synthesis_position - 1 :],
@@ -531,6 +543,18 @@ class CouncilEngine:
                         failure=failure,
                     )
 
+        synthesis_check: dict[str, Any] | None = None
+        if answer is not None:
+            synthesis_check = check_synthesis_outcome(
+                answer,
+                self._anonymize_aggregate(aggregate, candidate_mapping),
+            )
+            if not synthesis_check["consistent"]:
+                warnings.append(
+                    "Synthesis Outcome does not match the deterministic "
+                    f"aggregate ({synthesis_check['reason']}); the aggregate "
+                    "remains authoritative and the run is degraded."
+                )
         if answer is None:
             warnings.append("Synthesis did not complete; raw council record preserved")
         elif selected_synthesis_provider != self.synthesis_provider:
@@ -558,8 +582,29 @@ class CouncilEngine:
             recoveries=recoveries,
             workload_plan=workload_plan,
             candidate_mapping=candidate_mapping,
+            synthesis_check=synthesis_check,
         )
         return self._finish(run_id, result)
+
+    def _load_or_create_untrusted_marker(
+        self, run_id: str, existing_events: list[dict[str, Any]]
+    ) -> str:
+        """Return this run's random untrusted-data delimiter marker.
+
+        The marker is created once per run and persisted so that resume
+        rebuilds byte-identical prompts (invocation prompt hashes are locked).
+        """
+
+        for event in existing_events:
+            if event["event_type"] == _UNTRUSTED_MARKER_EVENT:
+                marker = event["payload"].get("marker")
+                if isinstance(marker, str) and marker:
+                    return marker
+        marker = new_untrusted_marker()
+        self.store.append_event(
+            run_id, _UNTRUSTED_MARKER_EVENT, {"marker": marker}
+        )
+        return marker
 
     def _parse_and_repair_juries(
         self,
@@ -623,6 +668,7 @@ class CouncilEngine:
                             response.content,
                             error,
                             labels,
+                            marker=self._untrusted_marker,
                         )
                         repair_prompt = (repair_system, repair_user)
                     except (TypeError, ValueError) as repair_exc:
@@ -2706,6 +2752,7 @@ class CouncilEngine:
         recoveries: list[dict[str, Any]],
         workload_plan: dict[str, Any],
         candidate_mapping: dict[str, str] | None,
+        synthesis_check: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         invocations = self.store.list_invocations(run_id)
         result_recoveries = [
@@ -2724,6 +2771,7 @@ class CouncilEngine:
                 status == "completed"
                 and not failures
                 and not result_recoveries
+                and (synthesis_check is None or synthesis_check["consistent"])
             )
             else "degraded"
         )
@@ -2754,6 +2802,16 @@ class CouncilEngine:
             "answer": answer,
             "synthesis": self._synthesis_summary(invocations, failures),
             "aggregate": aggregate,
+            "synthesis_check": synthesis_check,
+            "self_votes": (
+                None
+                if aggregate is None
+                else self_vote_report(
+                    [jury for jury in jury_records if jury.get("valid")],
+                    list(aggregate.get("borda_points") or {}),
+                    aggregate,
+                )
+            ),
             "candidate_namespace": (
                 None
                 if candidate_mapping is None

@@ -16,6 +16,39 @@ _LABELS_RE = re.compile(
 )
 
 
+_COUNCIL_RE = re.compile(
+    r"BEGIN_UNTRUSTED_COUNCIL_JSON(?:_[0-9a-f]+)?\n(.*)\n"
+    r"END_UNTRUSTED_COUNCIL_JSON",
+    re.DOTALL,
+)
+
+
+def _mock_outcome_line(user_prompt: str) -> str:
+    """State the deterministic aggregate outcome, as a faithful editor would."""
+
+    match = _COUNCIL_RE.search(user_prompt)
+    aggregate: dict[str, object] = {}
+    if match:
+        try:
+            decoded = json.loads(match.group(1))
+        except json.JSONDecodeError:
+            decoded = {}
+        if isinstance(decoded, dict) and isinstance(
+            decoded.get("aggregate"), dict
+        ):
+            aggregate = decoded["aggregate"]
+    outcome = aggregate.get("outcome")
+    if outcome == "winner":
+        return (
+            f"{aggregate.get('winner')} is the aggregate winner of the "
+            "deterministic mock council."
+        )
+    if outcome == "tie":
+        tied = ", ".join(str(label) for label in aggregate.get("tied_candidates") or [])
+        return f"The aggregate is a tie between {tied}."
+    return "The mock council selected no winner."
+
+
 class MockProvider(Provider):
     """Deterministic offline provider used by smoke tests and demos."""
 
@@ -47,7 +80,7 @@ class MockProvider(Provider):
         elif stage == "synthesis":
             content = (
                 "## Outcome\n"
-                "The deterministic mock council completed its synthesis.\n\n"
+                f"{_mock_outcome_line(user_prompt)}\n\n"
                 "## Consensus\n"
                 "The preserved aggregate controls the result.\n\n"
                 "## Dissent\n"

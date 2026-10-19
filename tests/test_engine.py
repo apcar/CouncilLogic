@@ -14,6 +14,7 @@ from unittest.mock import patch
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
+from model_council.providers.mock import _mock_outcome_line
 from model_council.engine import CouncilEngine  # noqa: E402
 from model_council.models import (  # noqa: E402
     ErrorCategory,
@@ -96,8 +97,8 @@ class FakeProvider(Provider):
             )
         elif stage == "jury":
             repair_match = re.search(
-                r"BEGIN_UNTRUSTED_JURY_REPAIR_JSON\n(.*?)\n"
-                r"END_UNTRUSTED_JURY_REPAIR_JSON",
+                r"BEGIN_UNTRUSTED_JURY_REPAIR_JSON_[0-9a-f]+\n(.*?)\n"
+                r"END_UNTRUSTED_JURY_REPAIR_JSON_[0-9a-f]+",
                 user_prompt,
                 re.DOTALL,
             )
@@ -116,8 +117,8 @@ class FakeProvider(Provider):
                 )
             else:
                 match = re.search(
-                    r"BEGIN_UNTRUSTED_EVALUATION_JSON\n(.*?)\n"
-                    r"END_UNTRUSTED_EVALUATION_JSON",
+                    r"BEGIN_UNTRUSTED_EVALUATION_JSON_[0-9a-f]+\n(.*?)\n"
+                    r"END_UNTRUSTED_EVALUATION_JSON_[0-9a-f]+",
                     user_prompt,
                     re.DOTALL,
                 )
@@ -154,7 +155,8 @@ class FakeProvider(Provider):
                 )
         elif stage == "synthesis":
             content = (
-                "## Outcome\nThe deterministic council completed.\n"
+                "## Outcome\n"
+                f"{_mock_outcome_line(user_prompt)}\n"
                 "## Consensus\nThe fixture is internally consistent.\n"
                 "## Dissent\nSynthetic wording differs.\n"
                 "## Verification needed\nRun the tests."
@@ -1068,7 +1070,7 @@ class CouncilEngineTests(unittest.TestCase):
 
             self.assertEqual(result["status"], "completed")
             self.assertEqual(result["completion_quality"], "clean")
-            self.assertIn("deterministic council completed", result["answer"])
+            self.assertIn("is the aggregate winner", result["answer"])
             self.assertEqual(len(result["proposals"]), 3)
             self.assertTrue(
                 all(proposal["artifact"] for proposal in result["proposals"])

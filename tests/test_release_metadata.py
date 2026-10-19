@@ -33,7 +33,7 @@ class ReleaseMetadataTests(unittest.TestCase):
 
     def test_independently_versioned_surfaces_remain_explicit(self) -> None:
         self.assertEqual(PROTOCOL_ID, "independent-jury")
-        self.assertEqual(PROTOCOL_VERSION, "1.2.2-beta")
+        self.assertEqual(PROTOCOL_VERSION, "1.3.0-beta")
         self.assertEqual(MOCK_SERVICE_PROFILE_VERSION, "0.2.0a1")
         self.assertEqual(
             CouncilRequestHandler.server_version,
