@@ -136,6 +136,45 @@ def _parser() -> argparse.ArgumentParser:
     _add_run_selection_arguments(run)
     run.add_argument("--idempotency-key")
     run.add_argument("--json", action="store_true")
+    run.add_argument(
+        "--approved-by",
+        help="Name of the human who approved this paid run's plan",
+    )
+    run.add_argument(
+        "--approval-token",
+        help="Token from `council approve` for this exact plan (paid runs)",
+    )
+
+    approve = subparsers.add_parser(
+        "approve",
+        help="HUMAN ONLY: approve the cost of one paid run plan (interactive)",
+        description=(
+            "Recompute the plan for this question and provider selection, "
+            "show its estimate, and after you retype the plan hash prefix, "
+            "issue a single-use token bound to that plan hash, estimate and "
+            "approver. Requires an interactive terminal. Not available to "
+            "the agent interface."
+        ),
+    )
+    _add_question_arguments(approve)
+    _add_run_selection_arguments(approve)
+    approve.add_argument("--plan-hash", required=True)
+    approve.add_argument("--approved-by", required=True)
+
+    agent = subparsers.add_parser(
+        "agent",
+        help="Agent JSON interface: read one JSON request, print one JSON reply",
+    )
+    agent.add_argument(
+        "--request",
+        default="-",
+        help="Path to a JSON request file, or - for stdin (default)",
+    )
+    agent.add_argument(
+        "--json",
+        action="store_true",
+        help="Accepted for clarity; output is always JSON",
+    )
 
     resume = subparsers.add_parser("resume", help="Resume a partial or failed run")
     resume.add_argument("run_id")
@@ -907,12 +946,92 @@ def _write_private_text(path: Path, content: str) -> None:
             temporary_path.unlink()
 
 
+def _agent_command(args: argparse.Namespace) -> int:
+    from .agent import config_for, handle_request
+
+    try:
+        if args.request == "-":
+            raw = sys.stdin.read()
+        else:
+            raw = Path(args.request).read_text(encoding="utf-8")
+        request = json.loads(raw)
+    except (OSError, ValueError) as exc:
+        reply: dict[str, Any] = {
+            "ok": False,
+            "error": "bad_request",
+            "message": f"could not read JSON request: {exc}",
+        }
+    else:
+        try:
+            base = config_for(args.mock, args.data_dir, args.config)
+        except (OSError, ValueError) as exc:
+            reply = {"ok": False, "error": "bad_config", "message": str(exc)}
+        else:
+            reply = handle_request(request, base, config_path=args.config)
+    print(json.dumps(reply, indent=2, sort_keys=True))
+    return 0 if reply.get("ok") else 2
+
+
+def _approve_command(config: AppConfig, args: argparse.Namespace) -> int:
+    from .approval import issue_token, plan_record
+
+    config = _select_run_config(config, args)
+    record = plan_record(config, _question_from_args(args))
+    if not record["approval_required"]:
+        print("council: mock/offline runs need no approval", file=sys.stderr)
+        return 2
+    if record["plan_hash"] != args.plan_hash.strip():
+        print(
+            "council: plan hash does not match this question and selection; "
+            "re-run `council plan` and approve the plan you reviewed",
+            file=sys.stderr,
+        )
+        return 4
+    if not sys.stdin.isatty():
+        print(
+            "council: approve is human-only and needs an interactive terminal",
+            file=sys.stderr,
+        )
+        return 4
+    estimate = record["estimate"]
+    print(f"Plan {record['plan_hash']}")
+    print(
+        "Providers: "
+        + ", ".join(f"{p['name']} ({p['model']})" for p in estimate["providers"])
+    )
+    print(
+        f"Up to {estimate['max_calls']} paid calls, <= "
+        f"{estimate['max_input_tokens_upper_bound']} input and <= "
+        f"{estimate['max_output_tokens_upper_bound']} output tokens."
+    )
+    prefix = record["plan_hash"][:12]
+    answer = input(f"Type {prefix} to approve this spend as {args.approved_by}: ")
+    if answer.strip() != prefix:
+        print("council: not approved", file=sys.stderr)
+        return 4
+    token = issue_token(config.data_dir, record, args.approved_by)
+    import hashlib
+
+    _store(config).record_run_approval(
+        hashlib.sha256(token.encode("ascii")).hexdigest(),
+        record["plan_hash"],
+        args.approved_by.strip(),
+        int(estimate["max_calls"]),
+    )
+    print("Approved. Single-use token (bound to this plan, estimate and approver):")
+    print(token)
+    return 0
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     data_lock: ServiceLock | None = None
     try:
         config = _app_config(args)
+        if args.command == "agent":
+            return _agent_command(args)
         if args.command in {
+            "approve",
             "doctor",
             "run",
             "resume",
@@ -957,7 +1076,34 @@ def main(argv: Sequence[str] | None = None) -> int:
                 config.policy,
                 synthesis_providers=config.synthesis_providers,
             )
+            from .approval import plan_record
+
+            record = plan_record(config, question)
+            if args.json:
+                plan = {
+                    **plan,
+                    "plan_hash": record["plan_hash"],
+                    "estimate": record["estimate"],
+                    "approval_required": record["approval_required"],
+                }
             _print_workload_plan(plan, as_json=args.json)
+            if not args.json:
+                estimate = record["estimate"]
+                print(f"Plan hash: {record['plan_hash']}")
+                print(
+                    f"Estimate: up to {estimate['max_calls']} calls "
+                    f"(healthy run {estimate['healthy_run_calls']}), "
+                    f"<= {estimate['max_input_tokens_upper_bound']} input and "
+                    f"<= {estimate['max_output_tokens_upper_bound']} output tokens"
+                )
+                print(
+                    "Approval: "
+                    + (
+                        "REQUIRED before a paid run (human runs `council approve`)"
+                        if record["approval_required"]
+                        else "not required (mock/offline)"
+                    )
+                )
             if not plan["within_limits"]:
                 try:
                     require_workload_within_limits(plan)
@@ -965,12 +1111,24 @@ def main(argv: Sequence[str] | None = None) -> int:
                     print(f"council: {exc}", file=sys.stderr)
                 return 2
             return 0
+        if args.command == "approve":
+            return _approve_command(config, args)
         if args.command == "run":
             config = _select_run_config(config, args)
             question = _question_from_args(args)
-            result = _engine(config).run(
-                question, idempotency_key=args.idempotency_key
-            )
+            from .agent import guarded_run
+
+            try:
+                result, _approval = guarded_run(
+                    config,
+                    question,
+                    approved_by=args.approved_by,
+                    approval_token=args.approval_token,
+                    idempotency_key=args.idempotency_key,
+                )
+            except PermissionError as exc:
+                print(f"council: {exc}", file=sys.stderr)
+                return 4
             _print_result(result, as_json=args.json)
             return 0 if result["status"] == "completed" else 3
         if args.command == "resume":

@@ -16,6 +16,7 @@ dependencies = []
 council = "model_council.cli:main"
 council-remote = "model_council.remote:main"
 council-service = "model_council.service:main"
+council-mcp = "model_council.mcp_server:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}

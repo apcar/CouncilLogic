@@ -17,7 +17,7 @@ from urllib.parse import parse_qsl, urlsplit
 from model_council.models import ProviderError, ProviderResponse
 
 
-CURRENT_SCHEMA_VERSION = 2
+CURRENT_SCHEMA_VERSION = 3
 HUMAN_DECISIONS = ("accept", "reject", "defer")
 HUMAN_DECISION_NOTE_MAX_CHARS = 4000
 DEFAULT_DATABASE_NAME = "council.sqlite3"
@@ -292,6 +292,10 @@ class CouncilStore:
             if current < 2:
                 self._migration_2(connection)
                 connection.execute("PRAGMA user_version = 2")
+                current = 2
+            if current < 3:
+                self._migration_3(connection)
+                connection.execute("PRAGMA user_version = 3")
             connection.commit()
         except BaseException:
             connection.rollback()
@@ -434,6 +438,88 @@ class CouncilStore:
             "INSERT OR IGNORE INTO schema_version(version, applied_at) VALUES (?, ?)",
             (2, _utc_now()),
         )
+
+    @staticmethod
+    def _migration_3(connection: sqlite3.Connection) -> None:
+        """Add single-use human approvals for paid runs."""
+
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS run_approvals (
+                token_sha256 TEXT PRIMARY KEY,
+                plan_hash TEXT NOT NULL,
+                approved_by TEXT NOT NULL,
+                max_calls INTEGER NOT NULL,
+                approved_at TEXT NOT NULL,
+                consumed_at TEXT,
+                run_id TEXT
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TRIGGER IF NOT EXISTS run_approvals_no_delete
+            BEFORE DELETE ON run_approvals
+            BEGIN
+                SELECT RAISE(ABORT, 'run approvals are append-only');
+            END
+            """
+        )
+        connection.execute(
+            "INSERT OR IGNORE INTO schema_version(version, applied_at) VALUES (?, ?)",
+            (3, _utc_now()),
+        )
+
+    def record_run_approval(
+        self, token_sha256: str, plan_hash: str, approved_by: str, max_calls: int
+    ) -> None:
+        with self._write_transaction() as connection:
+            connection.execute(
+                """
+                INSERT INTO run_approvals (
+                    token_sha256, plan_hash, approved_by, max_calls, approved_at
+                ) VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(token_sha256) DO NOTHING
+                """,
+                (token_sha256, plan_hash, approved_by, max_calls, _utc_now()),
+            )
+
+    def consume_run_approval(self, token_sha256: str, plan_hash: str) -> dict[str, Any]:
+        """Mark an approval used; raise PermissionError if unknown or used."""
+
+        with self._write_transaction() as connection:
+            row = connection.execute(
+                "SELECT * FROM run_approvals WHERE token_sha256 = ?",
+                (token_sha256,),
+            ).fetchone()
+            if row is None or row["plan_hash"] != plan_hash:
+                raise PermissionError(
+                    "Paid run refused: no recorded human approval for this plan"
+                )
+            if row["consumed_at"] is not None:
+                raise PermissionError(
+                    "Paid run refused: approval token was already used "
+                    f"(run {row['run_id'] or 'unknown'}); approve a new plan"
+                )
+            consumed_at = _utc_now()
+            connection.execute(
+                "UPDATE run_approvals SET consumed_at = ? WHERE token_sha256 = ?",
+                (consumed_at, token_sha256),
+            )
+        return {
+            "approved_by": row["approved_by"],
+            "plan_hash": row["plan_hash"],
+            "max_calls": row["max_calls"],
+            "approved_at": row["approved_at"],
+            "consumed_at": consumed_at,
+        }
+
+    def attach_run_approval(self, token_sha256: str, run_id: str) -> None:
+        with self._write_transaction() as connection:
+            connection.execute(
+                "UPDATE run_approvals SET run_id = ? WHERE token_sha256 = ? AND run_id IS NULL",
+                (run_id, token_sha256),
+            )
 
     def record_human_decision(
         self, run_id: str, decision: str, note: str

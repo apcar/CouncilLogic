@@ -203,6 +203,13 @@ council run --question "Your decision question"
 council decide RUN_ID --accept --note "Why I accept (or --reject / --defer)"
 ```
 
+Paid runs require a human-approved plan: `council plan --json` gives a plan
+hash and call/token estimate, a human runs `council approve` for that plan,
+and `council run` must present the matching single-use token
+(`--approved-by NAME --approval-token TOKEN`). Mock runs need no approval.
+Agents can use `council agent` (JSON) or `council-mcp` (MCP over stdio), but
+not `approve` or `decide`; see [Agent interface](docs/AGENT-INTERFACE.md).
+
 Keys can also come from the macOS Keychain or 1Password instead of the
 environment; `council doctor` shows each key's source, age, and a rotation
 reminder, and `council doctor --check-keys` validates keys with one free
@@ -274,6 +281,7 @@ reporting for this repository.
 
 - [Operations runbook](docs/OPERATIONS.md)
 - [Adding and rotating API keys](docs/KEYS.md)
+- [Agent interface (JSON CLI, MCP server, skill)](docs/AGENT-INTERFACE.md)
 - [Security model and vulnerability reporting](docs/SECURITY.md)
 - [Portable mock service and fixed reference topology](docs/PORTABLE-SERVICE.md)
 - [Research grounding and claim boundaries](docs/RESEARCH.md)

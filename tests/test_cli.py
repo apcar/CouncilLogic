@@ -320,10 +320,19 @@ class CliTests(unittest.TestCase):
                 selected_configs.append(config)
                 return StubEngine()
 
+            from model_council import agent as agent_module
+
+            real_plan_record = agent_module.plan_record
+
+            def approved_plan(config, question):
+                # This test covers provider selection, not the approval gate
+                # (tests/test_agent.py covers that).
+                return {**real_plan_record(config, question), "approval_required": False}
+
             with patch(
                 "model_council.cli._engine",
                 side_effect=capture_engine,
-            ):
+            ), patch.object(agent_module, "plan_record", side_effect=approved_plan):
                 code, output, error = self._call(
                     [
                         "--data-dir",

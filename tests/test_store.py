@@ -76,10 +76,10 @@ class CouncilStoreTest(unittest.TestCase):
         with self.store.connection() as connection:
             self.assertEqual(connection.execute("PRAGMA journal_mode").fetchone()[0], "wal")
             self.assertEqual(connection.execute("PRAGMA foreign_keys").fetchone()[0], 1)
-            self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], 2)
+            self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], 3)
             self.assertEqual(
                 connection.execute("SELECT MAX(version) FROM schema_version").fetchone()[0],
-                2,
+                3,
             )
             with self.assertRaises(sqlite3.IntegrityError):
                 connection.execute(

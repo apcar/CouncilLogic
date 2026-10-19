@@ -192,7 +192,7 @@ class HumanDecisionTests(unittest.TestCase):
             code, out, err = _call(["--mock", "--data-dir", tmp, "run", "--question", "Q?"])
             self.assertEqual(code, 0, err)
             lines = out.splitlines()
-            self.assertTrue(lines[0].startswith("Council winner: "))
+            self.assertTrue(lines[0].startswith(("Council winner: ", "Council result: ")))
             self.assertTrue(lines[1].startswith("Vote split"))
             self.assertTrue(lines[2].startswith("Dissent:"))
             awaiting = next(i for i, line in enumerate(lines) if line.startswith("Awaiting human decision"))
@@ -270,7 +270,7 @@ class HumanDecisionTests(unittest.TestCase):
                 connection.execute("PRAGMA user_version = 1")
             store = CouncilStore(tmp)
             with store.connection() as connection:
-                self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], 2)
+                self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], 3)
                 connection.execute("SELECT * FROM human_decisions").fetchall()
             store.close()
 

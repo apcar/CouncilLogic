@@ -32,6 +32,16 @@ are not established by this candidate.
   dependencies. `council doctor` shows each key's source, age, a rotation
   reminder and the provider's key page; `--check-keys` validates with one free
   models-list call. Provider `repr` redacts keys. See `docs/KEYS.md`.
+- Agent interface: `council agent` (one JSON request in, one JSON reply out)
+  and a stdlib-only MCP server `council-mcp` (stdio JSON-RPC) with plan, run,
+  inspect, list and capabilities. Every run reply ends with "Awaiting human
+  decision". `decide` and `approve` are human-only and not exposed to agents.
+  See `docs/AGENT-INTERFACE.md` and `docs/skills/councillogic/SKILL.md`.
+- Paid runs require human approval: `council plan --json` reports a plan hash
+  and call/token estimate; `council approve` (interactive terminal only)
+  issues a single-use HMAC token bound to that plan hash, estimate and
+  approver; `council run` refuses paid runs without a matching, unused token
+  (exit 4). Schema 3 adds the `run_approvals` table. Mock runs are exempt.
 - CI adds a ruff and mypy gate; type errors it found are fixed (including
   `os.sys.stderr` in two error paths).
 
