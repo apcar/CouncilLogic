@@ -1,0 +1,17 @@
+#!/bin/sh
+# Human-only CouncilLogic entry point (approve, decide, doctor, plan, inspect,
+# export, list). A person runs it with their own sudo password:
+#   sudo -u councillogic /usr/local/libexec/councillogic/human-entry approve ...
+# Agents get no sudo rule for this file.
+set -eu
+umask 077
+PREFIX=/opt/councillogic
+STATE=/var/lib/councillogic
+case "${1:-}" in
+  approve|decide|doctor|plan|inspect|export|list|providers) ;;
+  *) echo "usage: human-entry approve|decide|doctor|plan|inspect|export|list|providers ..." >&2; exit 64 ;;
+esac
+exec /usr/bin/env -i \
+  HOME="$STATE" PATH=/usr/bin:/bin LANG=C.UTF-8 TERM="${TERM:-dumb}" \
+  MODEL_COUNCIL_SECRET_COMMAND=/usr/local/libexec/councillogic/read-key \
+  "$PREFIX/venv/bin/council" --data-dir "$STATE/data" "$@"

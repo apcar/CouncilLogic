@@ -7,6 +7,9 @@ include assets/README.md
 include assets/councillogic-icon.png
 include assets/councillogic-mark.svg
 include docs/AGENT-INTERFACE.md
+include docs/SEPARATE-USER.md
+recursive-include docs/agent-schema *.json
+recursive-include scripts/service-user *
 include docs/KEYS.md
 include docs/skills/councillogic/SKILL.md
 include docs/OPERATIONS.md

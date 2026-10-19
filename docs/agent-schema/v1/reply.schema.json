@@ -1,0 +1,210 @@
+{
+  "$id": "https://github.com/apcar/CouncilLogic/docs/agent-schema/v1/reply.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "ok": {
+            "const": false
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "error",
+          "message"
+        ]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "action": {
+            "enum": [
+              "run",
+              "start",
+              "status",
+              "inspect"
+            ]
+          },
+          "ok": {
+            "const": true
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "run_id",
+          "status",
+          "human_decision_status",
+          "next_step"
+        ]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "action": {
+            "const": "plan"
+          },
+          "ok": {
+            "const": true
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "plan_hash",
+          "estimate",
+          "approval_required",
+          "next_step"
+        ]
+      }
+    }
+  ],
+  "description": "Every reply has schema_version, action and ok. Fields may be added in a compatible way within version 1; none listed here will be removed or change type without a new schema_version.",
+  "properties": {
+    "action": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "actions": {
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "approval_required": {
+      "type": "boolean"
+    },
+    "completion_quality": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "error": {
+      "enum": [
+        "bad_request",
+        "unknown_field",
+        "unsupported_schema_version",
+        "not_found",
+        "approval_required",
+        "request_id_conflict",
+        "human_only",
+        "busy",
+        "bad_config",
+        "internal"
+      ]
+    },
+    "estimate": {
+      "required": [
+        "paid",
+        "max_calls",
+        "healthy_run_calls",
+        "max_input_tokens_upper_bound",
+        "max_output_tokens_upper_bound",
+        "providers"
+      ],
+      "type": "object"
+    },
+    "finished": {
+      "type": "boolean"
+    },
+    "human_decision_status": {
+      "enum": [
+        "awaiting",
+        "accept",
+        "reject",
+        "defer"
+      ]
+    },
+    "message": {
+      "type": "string"
+    },
+    "next_step": {
+      "type": "string"
+    },
+    "ok": {
+      "type": "boolean"
+    },
+    "paid": {
+      "type": "boolean"
+    },
+    "plan_hash": {
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "progress": {
+      "properties": {
+        "failed": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "finished_calls": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "max_calls": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "running": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "succeeded": {
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "finished_calls",
+        "max_calls",
+        "running",
+        "succeeded",
+        "failed"
+      ],
+      "type": "object"
+    },
+    "replayed": {
+      "type": "boolean"
+    },
+    "run_id": {
+      "type": "string"
+    },
+    "runs": {
+      "items": {
+        "required": [
+          "run_id",
+          "status",
+          "created_at"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "schema_version": {
+      "const": "1"
+    },
+    "status": {
+      "type": "string"
+    },
+    "verdict": {
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "schema_version",
+    "action",
+    "ok"
+  ],
+  "title": "CouncilLogic agent reply, schema_version 1",
+  "type": "object"
+}

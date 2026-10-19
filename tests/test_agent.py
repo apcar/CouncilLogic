@@ -60,12 +60,15 @@ class StubEngine:
         self.store = CouncilStore(config.data_dir)
         self.calls = 0
 
-    def run(self, question: str, *, idempotency_key: str | None = None):
+    def create_run(self, question: str, *, idempotency_key: str | None = None) -> str:
         self.calls += 1
-        run_id = self.store.create_run(
+        return self.store.create_run(
             question=question, protocol_id="p", protocol_version="v",
             protocol_hash="h", provider_configs=[], policy={},
+            idempotency_key=idempotency_key,
         )
+
+    def resume(self, run_id: str):
         return {"run_id": run_id, "status": "completed", "warnings": []}
 
 
@@ -288,8 +291,9 @@ class DecideIsHumanOnlyTests(unittest.TestCase):
                 )
                 self.assertFalse(reply["ok"])
                 self.assertEqual(reply["error"], "human_only")
-            # Smuggled decision fields on allowed actions do nothing.
-            handle_request({"action": "inspect", "run_id": run["run_id"], "decision": "accept"}, config)
+            # Smuggled decision fields on allowed actions are rejected.
+            smuggled = handle_request({"action": "inspect", "run_id": run["run_id"], "decision": "accept"}, config)
+            self.assertEqual(smuggled["error"], "unknown_field")
             self.assertEqual(CouncilStore(tmp).list_human_decisions(run["run_id"]), [])
 
     def test_agent_module_never_writes_decisions(self) -> None:
@@ -302,7 +306,8 @@ class DecideIsHumanOnlyTests(unittest.TestCase):
         names = {tool["name"] for tool in TOOLS}
         self.assertEqual(
             names,
-            {"council_capabilities", "council_plan", "council_run", "council_inspect", "council_list"},
+            {"council_capabilities", "council_plan", "council_run", "council_start",
+             "council_status", "council_inspect", "council_list"},
         )
         server = McpServer(mock=True, data_dir=None, config_path=None)
         for name in ("council_decide", "council_approve", "decide"):
@@ -329,7 +334,7 @@ class McpServerTests(unittest.TestCase):
             replies = [json.loads(line) for line in stdout.getvalue().splitlines()]
         self.assertEqual([r.get("id") for r in replies], [1, 2, 3, 4, 5, None])
         self.assertEqual(replies[0]["result"]["serverInfo"]["name"], "councillogic")
-        self.assertEqual(len(replies[1]["result"]["tools"]), 5)
+        self.assertEqual(len(replies[1]["result"]["tools"]), 7)
         self.assertFalse(replies[2]["result"]["structuredContent"]["approval_required"])
         run = replies[3]["result"]["structuredContent"]
         self.assertEqual(run["human_decision_status"], "awaiting")

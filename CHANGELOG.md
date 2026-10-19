@@ -42,6 +42,16 @@ are not established by this candidate.
   issues a single-use HMAC token bound to that plan hash, estimate and
   approver; `council run` refuses paid runs without a matching, unused token
   (exit 4). Schema 3 adds the `run_approvals` table. Mock runs are exempt.
+- Agent schema v1 (`docs/agent-schema/v1/`, locked by tests): every reply has
+  `schema_version`, `action`, `ok`; unknown request fields are rejected.
+  `request_id` makes `run`/`start` retries return the same run (schema 4
+  `agent_requests`); a reused id with a different payload is an error.
+  `deadline_seconds` and `call_timeout_seconds` (also `--call-timeout-seconds`)
+  bound runs and are part of the plan hash. `start` runs in the background and
+  `status` reports progress; `council-mcp` sends `notifications/progress`
+  when given a progress token.
+- Optional separate OS user install (`docs/SEPARATE-USER.md`,
+  `scripts/service-user/`, dry-run by default) for Linux and macOS.
 - CI adds a ruff and mypy gate; type errors it found are fixed (including
   `os.sys.stderr` in two error paths).
 

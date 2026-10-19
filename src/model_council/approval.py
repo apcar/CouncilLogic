@@ -88,6 +88,8 @@ def plan_record(config: AppConfig, question: str) -> dict[str, Any]:
                 "model": p.model,
                 "lineage": p.lineage,
                 "endpoint": p.endpoint,
+                "timeout_seconds": p.timeout_seconds,
+                "stage_timeout_seconds": dict(sorted(p.stage_timeout_seconds.items())),
             }
             for p in config.providers
         ],

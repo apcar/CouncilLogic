@@ -1,0 +1,4 @@
+#!/bin/sh
+# Agent-side wrapper: the ONLY way an agent account should reach CouncilLogic.
+# Reads one JSON request on stdin, prints one JSON reply.
+exec sudo -n -u councillogic /usr/local/libexec/councillogic/agent-entry agent

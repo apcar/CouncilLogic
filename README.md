@@ -282,6 +282,7 @@ reporting for this repository.
 - [Operations runbook](docs/OPERATIONS.md)
 - [Adding and rotating API keys](docs/KEYS.md)
 - [Agent interface (JSON CLI, MCP server, skill)](docs/AGENT-INTERFACE.md)
+- [Optional separate OS user install](docs/SEPARATE-USER.md)
 - [Security model and vulnerability reporting](docs/SECURITY.md)
 - [Portable mock service and fixed reference topology](docs/PORTABLE-SERVICE.md)
 - [Research grounding and claim boundaries](docs/RESEARCH.md)

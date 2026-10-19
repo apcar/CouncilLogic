@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import sys
 import tempfile
@@ -73,7 +74,16 @@ def _add_run_selection_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--min-lineages", type=int)
     parser.add_argument("--max-calls", type=int)
     parser.add_argument("--max-parallel-calls", type=int)
-    parser.add_argument("--deadline-seconds", type=float)
+    parser.add_argument(
+        "--deadline-seconds",
+        type=float,
+        help="Overall run deadline; work still pending is recorded as partial",
+    )
+    parser.add_argument(
+        "--call-timeout-seconds",
+        type=float,
+        help="Cap every provider call's timeout (all stages) at this value",
+    )
     parser.add_argument("--max-question-chars", type=int)
     parser.add_argument("--max-stage-prompt-chars", type=int)
     parser.add_argument("--jury-repair-attempts", type=int)
@@ -234,6 +244,27 @@ def _app_config(args: argparse.Namespace) -> AppConfig:
     return config
 
 
+def apply_call_timeout(provider: ProviderConfig, seconds: float) -> ProviderConfig:
+    """Cap one provider's per-call timeout, including per-stage overrides."""
+
+    if (
+        isinstance(seconds, bool)
+        or not isinstance(seconds, (int, float))
+        or not math.isfinite(seconds)
+        or seconds <= 0
+    ):
+        raise ValueError("call_timeout_seconds must be a positive number")
+    seconds = float(seconds)
+    return replace(
+        provider,
+        timeout_seconds=min(provider.timeout_seconds, seconds),
+        stage_timeout_seconds={
+            stage: min(value, seconds)
+            for stage, value in provider.stage_timeout_seconds.items()
+        },
+    )
+
+
 def _select_run_config(
     config: AppConfig, args: argparse.Namespace
 ) -> AppConfig:
@@ -252,6 +283,11 @@ def _select_run_config(
         if unknown:
             raise ValueError(f"Unknown providers: {', '.join(unknown)}")
         providers = [available[name] for name in requested]
+    call_timeout = getattr(args, "call_timeout_seconds", None)
+    if call_timeout is not None:
+        providers = [
+            apply_call_timeout(provider, call_timeout) for provider in providers
+        ]
 
     policy_values = config.policy.to_dict()
     for field in _RUN_POLICY_OVERRIDES:
@@ -947,7 +983,7 @@ def _write_private_text(path: Path, content: str) -> None:
 
 
 def _agent_command(args: argparse.Namespace) -> int:
-    from .agent import config_for, handle_request
+    from .agent import config_for, handle_request, worker_args_for
 
     try:
         if args.request == "-":
@@ -967,7 +1003,12 @@ def _agent_command(args: argparse.Namespace) -> int:
         except (OSError, ValueError) as exc:
             reply = {"ok": False, "error": "bad_config", "message": str(exc)}
         else:
-            reply = handle_request(request, base, config_path=args.config)
+            reply = handle_request(
+                request,
+                base,
+                config_path=args.config,
+                worker_args=worker_args_for(args.mock, base.data_dir, args.config),
+            )
     print(json.dumps(reply, indent=2, sort_keys=True))
     return 0 if reply.get("ok") else 2
 

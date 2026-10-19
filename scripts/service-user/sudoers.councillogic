@@ -1,0 +1,6 @@
+# /etc/sudoers.d/councillogic  (install with: visudo -cf <file> first; mode 0440)
+# Members of the councillogic-agents group may run exactly two commands as the
+# councillogic user, without a password, and nothing else. No shell, no
+# environment pass-through, no other arguments.
+Defaults:%councillogic-agents env_reset, !setenv
+%councillogic-agents ALL=(councillogic) NOPASSWD: /usr/local/libexec/councillogic/agent-entry agent, /usr/local/libexec/councillogic/agent-entry mcp

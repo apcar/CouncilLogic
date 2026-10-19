@@ -17,7 +17,7 @@ from urllib.parse import parse_qsl, urlsplit
 from model_council.models import ProviderError, ProviderResponse
 
 
-CURRENT_SCHEMA_VERSION = 3
+CURRENT_SCHEMA_VERSION = 4
 HUMAN_DECISIONS = ("accept", "reject", "defer")
 HUMAN_DECISION_NOTE_MAX_CHARS = 4000
 DEFAULT_DATABASE_NAME = "council.sqlite3"
@@ -296,6 +296,23 @@ class CouncilStore:
             if current < 3:
                 self._migration_3(connection)
                 connection.execute("PRAGMA user_version = 3")
+                current = 3
+            if current < 4:
+                connection.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS agent_requests (
+                        request_id TEXT PRIMARY KEY,
+                        payload_sha256 TEXT NOT NULL,
+                        run_id TEXT NOT NULL REFERENCES runs(id),
+                        created_at TEXT NOT NULL
+                    )
+                    """
+                )
+                connection.execute(
+                    "INSERT OR IGNORE INTO schema_version(version, applied_at) VALUES (?, ?)",
+                    (4, _utc_now()),
+                )
+                connection.execute("PRAGMA user_version = 4")
             connection.commit()
         except BaseException:
             connection.rollback()
@@ -469,6 +486,38 @@ class CouncilStore:
             "INSERT OR IGNORE INTO schema_version(version, applied_at) VALUES (?, ?)",
             (3, _utc_now()),
         )
+
+    def get_agent_request(self, request_id: str) -> dict[str, Any] | None:
+        with self.connection() as connection:
+            row = connection.execute(
+                "SELECT * FROM agent_requests WHERE request_id = ?", (request_id,)
+            ).fetchone()
+        return None if row is None else dict(row)
+
+    def bind_agent_request(
+        self, request_id: str, payload_sha256: str, run_id: str
+    ) -> None:
+        with self._write_transaction() as connection:
+            connection.execute(
+                """
+                INSERT INTO agent_requests (request_id, payload_sha256, run_id, created_at)
+                VALUES (?, ?, ?, ?)
+                """,
+                (request_id, payload_sha256, run_id, _utc_now()),
+            )
+
+    def invocation_progress(self, run_id: str) -> dict[str, int]:
+        with self.connection() as connection:
+            rows = connection.execute(
+                "SELECT status, COUNT(*) AS n FROM invocations WHERE run_id = ? GROUP BY status",
+                (run_id,),
+            ).fetchall()
+        counts = {str(row["status"]): int(row["n"]) for row in rows}
+        return {
+            "running": counts.get("running", 0),
+            "succeeded": counts.get("succeeded", 0),
+            "failed": counts.get("failed", 0),
+        }
 
     def record_run_approval(
         self, token_sha256: str, plan_hash: str, approved_by: str, max_calls: int

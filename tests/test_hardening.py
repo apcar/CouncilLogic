@@ -270,7 +270,7 @@ class HumanDecisionTests(unittest.TestCase):
                 connection.execute("PRAGMA user_version = 1")
             store = CouncilStore(tmp)
             with store.connection() as connection:
-                self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], 3)
+                self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], 4)
                 connection.execute("SELECT * FROM human_decisions").fetchall()
             store.close()
 
