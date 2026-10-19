@@ -121,7 +121,7 @@ class PaidRunRefusalTests(unittest.TestCase):
             cases = [
                 {"question": QUESTION + " And also the other one?", "approved_by": "Andrew", "approval_token": token},
                 {"question": QUESTION, "approved_by": "Agent", "approval_token": token},
-                {"question": QUESTION, "approved_by": "Andrew", "approval_token": token[:-1] + "0"},
+                {"question": QUESTION, "approved_by": "Andrew", "approval_token": token[:-1] + ("1" if token.endswith("0") else "0")},
                 {"question": QUESTION, "approved_by": "Andrew", "approval_token": "cla1.deadbeef"},
                 {"question": QUESTION, "providers": ["openai", "anthropic", "gemini"], "approved_by": "Andrew", "approval_token": token},
             ]
