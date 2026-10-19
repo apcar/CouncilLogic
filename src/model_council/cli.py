@@ -131,6 +131,32 @@ def _parser() -> argparse.ArgumentParser:
     inspect.add_argument("run_id")
     inspect.add_argument("--json", action="store_true")
 
+    decide = subparsers.add_parser(
+        "decide",
+        help="Record the permanent human decision for a finished run",
+        description=(
+            "The council only advises; a human makes the final decision. "
+            "Each decision is appended to a permanent, hash-chained record "
+            "and is never overwritten. A later decision supersedes an "
+            "earlier one without erasing it."
+        ),
+    )
+    decide.add_argument("run_id")
+    choice = decide.add_mutually_exclusive_group(required=True)
+    choice.add_argument(
+        "--accept", dest="decision", action="store_const", const="accept"
+    )
+    choice.add_argument(
+        "--reject", dest="decision", action="store_const", const="reject"
+    )
+    choice.add_argument(
+        "--defer", dest="decision", action="store_const", const="defer"
+    )
+    decide.add_argument(
+        "--note", required=True, help="Reason for the decision (required)"
+    )
+    decide.add_argument("--json", action="store_true")
+
     listing = subparsers.add_parser("list", help="List persisted runs")
     listing.add_argument("--limit", type=int, default=20)
     listing.add_argument("--json", action="store_true")
@@ -442,10 +468,126 @@ def _print_workload_plan(plan: dict[str, Any], *, as_json: bool) -> None:
     )
 
 
-def _print_result(result: dict[str, Any], *, as_json: bool) -> None:
+def _council_verdict_lines(result: dict[str, Any]) -> list[str]:
+    """Lead with the deterministic aggregate: winner, vote split, dissent."""
+
+    aggregate = result.get("aggregate")
+    if not aggregate:
+        return ["Council result: no aggregate (jury stage did not complete)"]
+    mapping = (result.get("candidate_namespace") or {}).get(
+        "candidate_label_mapping"
+    ) or {}
+    labels = {provider: label for label, provider in mapping.items()}
+
+    def name(provider: Any) -> str:
+        label = labels.get(provider)
+        return f"{provider} [{label}]" if label else str(provider)
+
+    outcome = aggregate.get("outcome")
+    if outcome == "winner":
+        headline = f"Council winner: {name(aggregate.get('winner'))}"
+    elif outcome == "tie":
+        tied = ", ".join(
+            name(item) for item in aggregate.get("tied_candidates") or []
+        )
+        headline = f"Council result: TIE between {tied} (no winner)"
+    else:
+        headline = f"Council result: no winner ({outcome})"
+    lines = [headline]
+    wins = aggregate.get("win_counts") or {}
+    points = aggregate.get("borda_points") or {}
+    split = ", ".join(
+        f"{name(label)} {wins.get(label, 0)} first-place / "
+        f"{points.get(label, 0)} pts"
+        for label in aggregate.get("ranking") or []
+    )
+    lines.append(
+        f"Vote split ({aggregate.get('counted_judgments', 0)} counted, "
+        f"{aggregate.get('abstentions', 0)} abstained, "
+        f"{aggregate.get('invalid_judgments', 0)} invalid): {split}"
+    )
+    winner = aggregate.get("winner")
+    dissenters = [
+        f"{jury.get('juror')} -> {jury.get('winner') or 'abstain'}"
+        for jury in result.get("juries") or []
+        if jury.get("valid")
+        and (jury.get("abstain") or jury.get("winner") != winner)
+    ]
+    lines.append(
+        "Dissent: " + ("; ".join(dissenters) if dissenters else "none")
+    )
+    for disagreement in aggregate.get("material_disagreements") or []:
+        lines.append(f"  - {disagreement}")
+    self_votes = result.get("self_votes")
+    if self_votes:
+        excluded = self_votes.get("excluding_self_votes") or {}
+        lines.append(
+            f"Self-votes: {self_votes.get('self_vote_count', 0)}"
+            + (
+                f" ({', '.join(self_votes.get('self_votes') or [])})"
+                if self_votes.get("self_votes")
+                else ""
+            )
+            + "; result excluding self-votes: "
+            + (
+                str(excluded.get("winner"))
+                if excluded.get("winner")
+                else (
+                    "TIE " + ", ".join(excluded.get("tied_candidates") or [])
+                    if excluded.get("tie")
+                    else "no winner"
+                )
+            )
+            + (
+                " (DIFFERS)"
+                if self_votes.get("outcome_changes_without_self_votes")
+                else ""
+            )
+        )
+    check = result.get("synthesis_check")
+    if check and not check.get("consistent"):
+        lines.append(
+            "Synthesis check: MISMATCH - " + str(check.get("reason"))
+            + " (aggregate above is authoritative)"
+        )
+    return lines
+
+
+def _decision_line(
+    run_id: str, decisions: Sequence[dict[str, Any]] | None
+) -> str:
+    if not decisions:
+        return (
+            "Awaiting human decision "
+            f"(council decide {run_id} --accept|--reject|--defer --note TEXT)"
+        )
+    latest = decisions[-1]
+    return (
+        f"Human decision: {latest['decision'].upper()} at "
+        f"{latest['decided_at']} - {latest['note'] or '(no note)'}"
+        + (
+            f" [{len(decisions)} records; earlier ones preserved]"
+            if len(decisions) > 1
+            else ""
+        )
+    )
+
+
+def _print_result(
+    result: dict[str, Any],
+    *,
+    as_json: bool,
+    decisions: Sequence[dict[str, Any]] | None = None,
+) -> None:
     if as_json:
+        # JSON keeps the stored result contract; decisions are reported by
+        # `inspect --json` and `export` under "human_decisions".
         print(json.dumps(result, indent=2, sort_keys=True))
         return
+    for line in _council_verdict_lines(result):
+        print(line)
+    print(_decision_line(result["run_id"], decisions))
+    print()
     print(f"Run: {result['run_id']}")
     print(f"Status: {result['status']}")
     print(
@@ -490,8 +632,14 @@ def _markdown_export(
     run: dict[str, Any],
     invocations: list[dict[str, Any]],
     events: list[dict[str, Any]],
+    decisions: Sequence[dict[str, Any]] | None = None,
 ) -> str:
     result = run.get("result") or {}
+    verdict = (
+        _council_verdict_lines(result)
+        if result
+        else ["Council result: no result yet"]
+    )
     lines = [
         "# CouncilLogic Run",
         "",
@@ -503,6 +651,17 @@ def _markdown_export(
         ),
         f"- Protocol: `{run['protocol_id']}@{run['protocol_version']}`",
         f"- Protocol hash: `{run['protocol_hash']}`",
+        "",
+        "## Council verdict",
+        "",
+        *[f"- {line}" for line in verdict],
+        f"- {_decision_line(run['id'], decisions)}",
+        "",
+        "## Human decisions (append-only)",
+        "",
+        "```json",
+        json.dumps(list(decisions or []), indent=2, sort_keys=True),
+        "```",
         "",
         "## Question",
         "",
@@ -698,6 +857,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             "inspect",
             "list",
             "export",
+            "decide",
         }:
             data_lock = ServiceLock(config.data_dir)
             data_lock.acquire()
@@ -764,6 +924,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "run": run,
                 "invocations": store.list_invocations(args.run_id),
                 "events": store.list_events(args.run_id),
+                "human_decisions": store.list_human_decisions(args.run_id),
             }
             if args.json:
                 print(json.dumps(payload, indent=2, sort_keys=True))
@@ -778,7 +939,28 @@ def main(argv: Sequence[str] | None = None) -> int:
                     f"result: {'present' if run.get('result') else 'not yet present'}"
                 )
                 if run.get("result"):
-                    _print_result(run["result"], as_json=False)
+                    _print_result(
+                        run["result"],
+                        as_json=False,
+                        decisions=store.list_human_decisions(args.run_id),
+                    )
+            return 0
+        if args.command == "decide":
+            record = store.record_human_decision(
+                args.run_id, args.decision, args.note
+            )
+            if args.json:
+                print(json.dumps(record, indent=2, sort_keys=True))
+            else:
+                print(
+                    f"Recorded human decision {record['decision'].upper()} "
+                    f"for run {record['run_id']} (record "
+                    f"{record['record_sha256'][:16]}, decision #{record['id']})."
+                )
+                print(
+                    "This record is permanent; a later decision is appended "
+                    "and does not overwrite it."
+                )
             return 0
         if args.command == "list":
             runs = store.list_runs(limit=args.limit)
@@ -797,6 +979,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 raise KeyError(f"Unknown run: {args.run_id}")
             invocations = store.list_invocations(args.run_id)
             events = store.list_events(args.run_id)
+            decisions = store.list_human_decisions(args.run_id)
             output_path = Path(args.output).expanduser()
             output_path.parent.mkdir(parents=True, exist_ok=True)
             if args.format == "json":
@@ -805,12 +988,15 @@ def main(argv: Sequence[str] | None = None) -> int:
                         "run": run,
                         "invocations": invocations,
                         "events": events,
+                        "human_decisions": decisions,
                     },
                     indent=2,
                     sort_keys=True,
                 )
             else:
-                content = _markdown_export(run, invocations, events)
+                content = _markdown_export(
+                    run, invocations, events, decisions
+                )
             _write_private_text(output_path, content + "\n")
             print(output_path)
             return 0

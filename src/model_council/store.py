@@ -17,7 +17,9 @@ from urllib.parse import parse_qsl, urlsplit
 from model_council.models import ProviderError, ProviderResponse
 
 
-CURRENT_SCHEMA_VERSION = 1
+CURRENT_SCHEMA_VERSION = 2
+HUMAN_DECISIONS = ("accept", "reject", "defer")
+HUMAN_DECISION_NOTE_MAX_CHARS = 4000
 DEFAULT_DATABASE_NAME = "council.sqlite3"
 _DATABASE_SUFFIXES = {".db", ".sqlite", ".sqlite3"}
 _TERMINAL_RUN_STATUSES = {"succeeded", "completed", "partial", "failed", "cancelled"}
@@ -285,6 +287,10 @@ class CouncilStore:
             if current < 1:
                 self._migration_1(connection)
                 connection.execute("PRAGMA user_version = 1")
+                current = 1
+            if current < 2:
+                self._migration_2(connection)
+                connection.execute("PRAGMA user_version = 2")
             connection.commit()
         except BaseException:
             connection.rollback()
@@ -380,6 +386,161 @@ class CouncilStore:
             "INSERT OR IGNORE INTO schema_version(version, applied_at) VALUES (?, ?)",
             (1, _utc_now()),
         )
+
+    @staticmethod
+    def _migration_2(connection: sqlite3.Connection) -> None:
+        """Add the append-only human decision ledger."""
+
+        statements = (
+            """
+            CREATE TABLE IF NOT EXISTS human_decisions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                run_id TEXT NOT NULL REFERENCES runs(id),
+                decision TEXT NOT NULL
+                    CHECK (decision IN ('accept', 'reject', 'defer')),
+                note TEXT NOT NULL,
+                aggregate_outcome TEXT,
+                aggregate_winner TEXT,
+                result_sha256 TEXT,
+                previous_record_sha256 TEXT,
+                record_json TEXT NOT NULL,
+                record_sha256 TEXT NOT NULL UNIQUE,
+                decided_at TEXT NOT NULL
+            )
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_human_decisions_run
+            ON human_decisions(run_id, id)
+            """,
+            """
+            CREATE TRIGGER IF NOT EXISTS human_decisions_no_update
+            BEFORE UPDATE ON human_decisions
+            BEGIN
+                SELECT RAISE(ABORT, 'human decisions are append-only');
+            END
+            """,
+            """
+            CREATE TRIGGER IF NOT EXISTS human_decisions_no_delete
+            BEFORE DELETE ON human_decisions
+            BEGIN
+                SELECT RAISE(ABORT, 'human decisions are append-only');
+            END
+            """,
+        )
+        for statement in statements:
+            connection.execute(statement)
+        connection.execute(
+            "INSERT OR IGNORE INTO schema_version(version, applied_at) VALUES (?, ?)",
+            (2, _utc_now()),
+        )
+
+    def record_human_decision(
+        self, run_id: str, decision: str, note: str
+    ) -> dict[str, Any]:
+        """Append one permanent human decision for a finished run.
+
+        Records are never updated or deleted (SQLite triggers enforce this).
+        A later decision supersedes an earlier one only by being appended
+        after it; each record hashes the previous record to form a chain.
+        """
+
+        if decision not in HUMAN_DECISIONS:
+            raise ValueError(
+                "decision must be one of: " + ", ".join(HUMAN_DECISIONS)
+            )
+        if not isinstance(note, str):
+            raise ValueError("decision note must be text")
+        note = note.strip()
+        if len(note) > HUMAN_DECISION_NOTE_MAX_CHARS:
+            raise ValueError(
+                "decision note must be at most "
+                f"{HUMAN_DECISION_NOTE_MAX_CHARS} characters"
+            )
+        _assert_no_credentials({"note": note}, "$.decision")
+        with self._write_transaction() as connection:
+            row = connection.execute(
+                "SELECT status, result_json FROM runs WHERE id = ?", (run_id,)
+            ).fetchone()
+            if row is None:
+                raise KeyError(f"unknown run: {run_id}")
+            result = _decode_json(row["result_json"], None)
+            if not result:
+                raise ValueError(
+                    "run has no result yet; resume or wait before deciding"
+                )
+            aggregate = result.get("aggregate") or {}
+            previous = connection.execute(
+                """
+                SELECT record_sha256 FROM human_decisions
+                WHERE run_id = ? ORDER BY id DESC LIMIT 1
+                """,
+                (run_id,),
+            ).fetchone()
+            record = {
+                "run_id": run_id,
+                "decision": decision,
+                "note": note,
+                "run_status": row["status"],
+                "completion_quality": result.get("completion_quality"),
+                "aggregate_outcome": aggregate.get("outcome"),
+                "aggregate_winner": aggregate.get("winner"),
+                "result_sha256": _sha256_text(_canonical_json(result)),
+                "previous_record_sha256": (
+                    None if previous is None else previous["record_sha256"]
+                ),
+                "decided_at": _utc_now(),
+            }
+            record_json = _canonical_json(record)
+            record_sha256 = _sha256_text(record_json)
+            cursor = connection.execute(
+                """
+                INSERT INTO human_decisions (
+                    run_id, decision, note, aggregate_outcome,
+                    aggregate_winner, result_sha256, previous_record_sha256,
+                    record_json, record_sha256, decided_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    run_id,
+                    decision,
+                    note,
+                    record["aggregate_outcome"],
+                    record["aggregate_winner"],
+                    record["result_sha256"],
+                    record["previous_record_sha256"],
+                    record_json,
+                    record_sha256,
+                    record["decided_at"],
+                ),
+            )
+        return {
+            "id": int(cursor.lastrowid),
+            **record,
+            "record_sha256": record_sha256,
+        }
+
+    def list_human_decisions(self, run_id: str) -> list[dict[str, Any]]:
+        """Return every human decision for a run, oldest first."""
+
+        with self.connection() as connection:
+            rows = connection.execute(
+                "SELECT * FROM human_decisions WHERE run_id = ? ORDER BY id",
+                (run_id,),
+            ).fetchall()
+        decisions = []
+        for row in rows:
+            record = _decode_json(row["record_json"], {})
+            decisions.append(
+                {
+                    "id": row["id"],
+                    **record,
+                    "record_sha256": row["record_sha256"],
+                    "hash_verified": (
+                        _sha256_text(row["record_json"]) == row["record_sha256"]
+                    ),
+                }
+            )
+        return decisions
 
     def create_run(
         self,
