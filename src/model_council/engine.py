@@ -1242,6 +1242,7 @@ class CouncilEngine:
             existing = self.store.get_successful_invocation(
                 run_id, stage, provider_name
             )
+            response: ProviderResponse | None
             if existing:
                 response = self._response_from_record(existing)
                 completion_error = self._completion_error(response)
@@ -1982,7 +1983,7 @@ class CouncilEngine:
             and event["payload"].get("provider") == provider_name
         )
         attempt = (
-            int(invocation.get("call_count") if invocation else 1)
+            int(invocation.get("call_count") or 0 if invocation else 1)
             + undispatched_attempts
         )
         lease: CallLease | None = None
@@ -2496,11 +2497,11 @@ class CouncilEngine:
         ):
             raise ValueError("Provider retry audit is missing")
         recoveries: list[dict[str, Any]] = []
-        for slot, retry_events in grouped.items():
+        for group_slot, retry_events in grouped.items():
             retry_events.sort(
                 key=lambda event: int(event["retry_call_count"])
             )
-            invocation = invocation_by_slot.get(slot)
+            invocation = invocation_by_slot.get(group_slot)
             if invocation is None:
                 raise ValueError(
                     "Provider retry audit has no invocation record"
@@ -2519,7 +2520,7 @@ class CouncilEngine:
                 is_truncation = (
                     retry_event["retry_kind"] == "truncation"
                 )
-                if is_truncation and slot in completed_truncation_slots:
+                if is_truncation and group_slot in completed_truncation_slots:
                     continue
                 next_event = (
                     retry_events[index + 1]

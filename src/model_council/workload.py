@@ -154,7 +154,7 @@ def _stage_prompt_chars(
         # decision-valid object. A NUL expands to six characters when the raw
         # response is embedded in the outer JSON payload, so fill every byte
         # outside the smallest useful object with NULs for a true upper bound.
-        repair_value = {
+        repair_value: dict[str, Any] = {
             "winner": None,
             "ranking": [],
             "confidence": "low",

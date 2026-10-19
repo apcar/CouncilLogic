@@ -195,8 +195,8 @@ class HumanDecisionTests(unittest.TestCase):
             self.assertTrue(lines[0].startswith("Council winner: "))
             self.assertTrue(lines[1].startswith("Vote split"))
             self.assertTrue(lines[2].startswith("Dissent:"))
-            awaiting = next(i for i, l in enumerate(lines) if l.startswith("Awaiting human decision"))
-            answer = next(i for i, l in enumerate(lines) if l == "## Outcome")
+            awaiting = next(i for i, line in enumerate(lines) if line.startswith("Awaiting human decision"))
+            answer = next(i for i, line in enumerate(lines) if line == "## Outcome")
             self.assertLess(awaiting, answer)
 
     def test_decisions_are_append_only_and_chained(self) -> None:

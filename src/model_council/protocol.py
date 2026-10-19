@@ -1045,7 +1045,7 @@ def aggregate_juries(
         outcome = "winner"
         consensus = (
             "unanimous"
-            if wins[winner] == counted_judgments
+            if winner is not None and wins[winner] == counted_judgments
             else "divided"
         )
 

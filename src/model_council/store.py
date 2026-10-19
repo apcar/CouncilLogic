@@ -100,7 +100,8 @@ def _jsonable(value: Any) -> Any:
     if isinstance(value, Path):
         return str(value)
     if dataclasses.is_dataclass(value):
-        return _jsonable(dataclasses.asdict(value))
+        if not isinstance(value, type):
+            return _jsonable(dataclasses.asdict(value))
     if hasattr(value, "to_dict") and callable(value.to_dict):
         return _jsonable(value.to_dict())
     if isinstance(value, dict):
@@ -514,7 +515,7 @@ class CouncilStore:
                 ),
             )
         return {
-            "id": int(cursor.lastrowid),
+            "id": int(cursor.lastrowid or 0),
             **record,
             "record_sha256": record_sha256,
         }
@@ -793,7 +794,7 @@ class CouncilStore:
                     _utc_now(),
                 ),
             )
-        return int(cursor.lastrowid)
+        return int(cursor.lastrowid or 0)
 
     def list_events(self, run_id: str) -> list[dict[str, Any]]:
         with self.connection() as connection:
@@ -1091,7 +1092,7 @@ class CouncilStore:
             retry_event_id: int | None = None
             retry_kind: str | None = None
             prior_failure: dict[str, Any] | None = None
-            restored_call_count = 0
+            restored_call_count: Any = 0
             if prior_invocation is None:
                 if attempted_call_count != 1:
                     raise RuntimeError(

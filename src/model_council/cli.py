@@ -344,6 +344,7 @@ def _providers(
     built: dict[str, Any] = {}
     missing: list[str] = []
     for provider_config in config.providers:
+        key: str | None
         if provider_config.name.startswith("mock"):
             key = "mock-only-sentinel"
         else:
@@ -410,6 +411,7 @@ def _doctor(
         )
 
     for provider in config.providers:
+        source: str | None
         if provider.name.startswith("mock"):
             source = "built-in mock"
         else:
@@ -982,14 +984,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             run = store.get_run(args.run_id)
             if run is None:
                 raise KeyError(f"Unknown run: {args.run_id}")
-            payload = {
+            inspect_payload: dict[str, Any] = {
                 "run": run,
                 "invocations": store.list_invocations(args.run_id),
                 "events": store.list_events(args.run_id),
                 "human_decisions": store.list_human_decisions(args.run_id),
             }
             if args.json:
-                print(json.dumps(payload, indent=2, sort_keys=True))
+                print(json.dumps(inspect_payload, indent=2, sort_keys=True))
             else:
                 print(f"Run: {run['id']}")
                 print(f"Status: {run['status']}")
@@ -997,7 +999,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     f"Protocol: {run['protocol_id']}@{run['protocol_version']}"
                 )
                 print(
-                    f"Invocations: {len(payload['invocations'])}; "
+                    f"Invocations: {len(inspect_payload['invocations'])}; "
                     f"result: {'present' if run.get('result') else 'not yet present'}"
                 )
                 if run.get("result"):

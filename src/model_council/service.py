@@ -11,6 +11,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import ipaddress
 import json
 import os
+import sys
 from pathlib import Path
 import re
 import socket
@@ -19,7 +20,7 @@ from typing import Any, Callable, Mapping, Sequence
 from urllib.parse import urlsplit
 import uuid
 
-from .access_policy import CouncilAction, Principal, Tenant, six_principals
+from .access_policy import CouncilAction, Principal, six_principals
 from .config import AppConfig, mock_config
 from .engine import CallLease, CouncilEngine
 from .models import ErrorCategory, ProviderConfig, ProviderError
@@ -233,7 +234,9 @@ class CouncilApplication:
         self._executor: ThreadPoolExecutor | None = None
         self._closed = False
         try:
-            self.config = config or mock_config(data_dir)
+            self.config = config or mock_config(
+                None if data_dir is None else Path(data_dir)
+            )
             _validate_mock_only(self.config)
             self.council_store = council_store or CouncilStore(data_dir)
             self._reject_live_mode_runs()
@@ -793,7 +796,7 @@ class CouncilRequestHandler(BaseHTTPRequestHandler):
 
     @property
     def application(self) -> CouncilApplication:
-        return self.server.application  # type: ignore[attr-defined,no-any-return]
+        return self.server.application  # type: ignore[attr-defined]
 
     def do_GET(self) -> None:
         request_id = str(uuid.uuid4())
@@ -847,6 +850,7 @@ class CouncilRequestHandler(BaseHTTPRequestHandler):
                 "Idempotency-Key",
                 required=True,
             )
+            assert idempotency_key is not None  # required=True raises otherwise
             payload = self._read_json_object()
             if set(payload) != {"question"}:
                 raise ServiceInputError(
@@ -953,7 +957,7 @@ class CouncilRequestHandler(BaseHTTPRequestHandler):
             )
         content_type = self._single_header("Content-Type", required=True)
         media_type, *parameters = [
-            part.strip().lower() for part in content_type.split(";")
+            part.strip().lower() for part in (content_type or "").split(";")
         ]
         if media_type != "application/json" or any(
             parameter != "charset=utf-8" for parameter in parameters
@@ -964,7 +968,7 @@ class CouncilRequestHandler(BaseHTTPRequestHandler):
                 "Content-Type must be application/json with UTF-8",
             )
         raw_length = self._single_header("Content-Length", required=True)
-        if not raw_length.isascii() or not raw_length.isdigit():
+        if raw_length is None or not raw_length.isascii() or not raw_length.isdigit():
             raise ServiceInputError(
                 HTTPStatus.BAD_REQUEST,
                 "invalid_content_length",
@@ -1336,6 +1340,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             application,
         )
         host, port = server.server_address[:2]
+        if isinstance(host, bytes):
+            host = host.decode("ascii", "replace")
         print(
             f"council-service mock-only listening on http://{host}:{port}",
             flush=True,
@@ -1345,7 +1351,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     except KeyboardInterrupt:
         return 130
     except (OSError, ValueError) as error:
-        print(f"error: {error}", file=os.sys.stderr)
+        print(f"error: {error}", file=sys.stderr)
         return 2
     finally:
         if server is not None:

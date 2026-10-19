@@ -14,7 +14,7 @@ from unittest.mock import patch
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
-from model_council.providers.mock import _mock_outcome_line
+from model_council.providers.mock import _mock_outcome_line  # noqa: E402
 from model_council.engine import CouncilEngine  # noqa: E402
 from model_council.models import (  # noqa: E402
     ErrorCategory,

@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import sys
 import stat
 import time
 import uuid
@@ -349,7 +350,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         _print_payload(payload, as_json=args.json)
         return 0
     except (OSError, ValueError, RuntimeError, TimeoutError) as exc:
-        print(f"error: {exc}", file=os.sys.stderr)
+        print(f"error: {exc}", file=sys.stderr)
         return 2
 
 

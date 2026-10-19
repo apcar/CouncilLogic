@@ -22,3 +22,21 @@ package-dir = {"" = "src"}
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+src = ["src", "tests", "scripts"]
+
+[tool.ruff.lint]
+# Correctness-focused gate: pyflakes, pycodestyle errors, bugbear, and
+# import hygiene. Style-only families are intentionally left out.
+select = ["E4", "E7", "E9", "F", "B", "W6"]
+
+[tool.mypy]
+python_version = "3.11"
+files = ["src/model_council"]
+warn_unused_ignores = true
+warn_redundant_casts = true
+no_implicit_optional = true
+check_untyped_defs = true

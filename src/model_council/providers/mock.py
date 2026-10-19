@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from typing import Any
 
 from model_council.models import ProviderConfig, ProviderResponse, Usage
 
@@ -27,7 +28,7 @@ def _mock_outcome_line(user_prompt: str) -> str:
     """State the deterministic aggregate outcome, as a faithful editor would."""
 
     match = _COUNCIL_RE.search(user_prompt)
-    aggregate: dict[str, object] = {}
+    aggregate: dict[str, Any] = {}
     if match:
         try:
             decoded = json.loads(match.group(1))
