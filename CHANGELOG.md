@@ -6,10 +6,34 @@ All notable public changes to CouncilLogic are recorded here.
 
 No changes beyond the prepared `0.3.1a1` candidate.
 
-## [0.3.1a1] - 2026-09-11
+## [0.3.1a1] - 2026-09-11, hardened 2026-10-19
 
 Prepared locally for release. Publication and current provider availability
 are not established by this candidate.
+
+### Hardening (2026-10-19)
+
+- `council decide RUN_ID --accept|--reject|--defer --note TEXT` records the
+  human final decision in a new append-only, hash-chained `human_decisions`
+  table (schema 2; SQLite triggers reject UPDATE and DELETE). `run`, `resume`
+  and `inspect` lead with the deterministic winner, vote split, dissent and
+  self-vote check, then show *Awaiting human decision* or the latest decision.
+  `inspect --json` and `export` include every decision.
+- Protocol `1.3.0-beta`: untrusted data is wrapped in random per-run
+  delimiters (`secrets.token_hex`), persisted so resume rebuilds identical
+  prompts. The synthesizer must name the aggregate outcome first in Outcome,
+  and the engine checks it: a missing section, wrong winner, invented tie or
+  invented winner marks the run degraded and is recorded as `synthesis_check`.
+- Results include `self_votes`: jurors that ranked their own candidate first,
+  plus the Borda result with every juror's own candidate removed, and whether
+  that changes the outcome.
+- Optional key sources: macOS Keychain (`MODEL_COUNCIL_KEYCHAIN_SERVICE`) and
+  1Password (`<KEY>_OP_REF=op://...`), before the environment, with no Python
+  dependencies. `council doctor` shows each key's source, age, a rotation
+  reminder and the provider's key page; `--check-keys` validates with one free
+  models-list call. Provider `repr` redacts keys. See `docs/KEYS.md`.
+- CI adds a ruff and mypy gate; type errors it found are fixed (including
+  `os.sys.stderr` in two error paths).
 
 ### Added
 
