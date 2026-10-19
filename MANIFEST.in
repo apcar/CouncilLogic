@@ -6,6 +6,7 @@ include council.example.toml
 include assets/README.md
 include assets/councillogic-icon.png
 include assets/councillogic-mark.svg
+include docs/KEYS.md
 include docs/OPERATIONS.md
 include docs/PORTABLE-SERVICE.md
 include docs/RESEARCH.md
