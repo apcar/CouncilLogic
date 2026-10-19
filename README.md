@@ -28,11 +28,19 @@ CouncilLogic is a working expression of how I approach AI systems: separate
 judgment from authority, make disagreement visible, bound work and failure
 before execution, and preserve a record another operator can inspect.
 
+**A human makes the final decision.** The council only advises. Every run
+ends in the state *Awaiting human decision*, and nothing is decided until a
+person records `council decide RUN_ID --accept|--reject|--defer --note TEXT`.
+That record is permanent: decisions are appended to a hash-chained ledger that
+SQLite triggers protect from update or deletion, and a later decision
+supersedes an earlier one without erasing it.
+
 | Principle | Implemented evidence |
 |---|---|
+| Human final authority | `council run` leads with the deterministic winner, vote split, dissent, and self-vote check, then *Awaiting human decision*; `council decide` writes the permanent decision record. |
 | Separate judgment from authority | Distinct provider/model lineages answer independently; models receive no tools or permission to act. |
 | Define limits before execution | Prompt growth, logical calls, concurrency, deadlines, output, and recovery are bounded by policy. |
-| Preserve uncertainty | Metadata-blind juries, deterministic aggregation, abstentions, ties, disagreement, and degraded completion remain visible. |
+| Preserve uncertainty | Metadata-blind juries, deterministic aggregation, abstentions, ties, disagreement, self-votes (with and without), and degraded completion remain visible. A synthesis whose Outcome contradicts the aggregate marks the run degraded. |
 | Make operation inspectable | Proposals, juries, failures, recoveries, policy, aggregate, and synthesis are durably recorded and exportable. |
 
 The fastest review path is to run the
@@ -192,7 +200,13 @@ council doctor
 council providers
 council plan --file ./work/private-question.md
 council run --question "Your decision question"
+council decide RUN_ID --accept --note "Why I accept (or --reject / --defer)"
 ```
+
+Keys can also come from the macOS Keychain or 1Password instead of the
+environment; `council doctor` shows each key's source, age, and a rotation
+reminder, and `council doctor --check-keys` validates keys with one free
+models-list call per provider. See [Keys](docs/KEYS.md).
 
 `doctor` checks local storage and credential presence; it does not prove that
 the configured account can currently use each pinned model. A successful live
@@ -259,6 +273,7 @@ reporting for this repository.
 ## Documentation
 
 - [Operations runbook](docs/OPERATIONS.md)
+- [Adding and rotating API keys](docs/KEYS.md)
 - [Security model and vulnerability reporting](docs/SECURITY.md)
 - [Portable mock service and fixed reference topology](docs/PORTABLE-SERVICE.md)
 - [Research grounding and claim boundaries](docs/RESEARCH.md)

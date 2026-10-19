@@ -21,7 +21,13 @@ from .engine import CouncilEngine
 from .models import ProviderConfig, RunPolicy
 from .providers.factory import create_provider
 from .run_lock import ServiceLock
-from .secrets import SecretResolver, default_secret_resolver
+from .keys import (
+    KEY_MANAGEMENT_URLS,
+    check_key,
+    provider_kind,
+    rotation_status,
+)
+from .secrets import SecretResolver, default_secret_resolver, key_rotated_at
 from .store import CouncilStore, service_managed_data_dir
 from .version import PACKAGE_VERSION
 from .workload import estimate_workload, require_workload_within_limits
@@ -102,6 +108,14 @@ def _parser() -> argparse.ArgumentParser:
     )
     doctor.add_argument(
         "--json", action="store_true", help="Print machine-readable output"
+    )
+    doctor.add_argument(
+        "--check-keys",
+        action="store_true",
+        help=(
+            "Validate each key with one free models-list request per "
+            "provider (makes network calls; off by default)"
+        ),
     )
 
     providers = subparsers.add_parser(
@@ -363,8 +377,15 @@ def _engine(
     )
 
 
-def _doctor(config: AppConfig, *, as_json: bool) -> int:
-    resolver = default_secret_resolver()
+def _doctor(
+    config: AppConfig,
+    *,
+    as_json: bool,
+    check_keys: bool = False,
+    resolver: SecretResolver | None = None,
+    transport: Any = None,
+) -> int:
+    resolver = resolver or default_secret_resolver()
     checks: list[dict[str, Any]] = []
     all_ready = True
     try:
@@ -394,16 +415,40 @@ def _doctor(config: AppConfig, *, as_json: bool) -> int:
         else:
             source = resolver.source_for(provider.secret_name)
         ready = source is not None
+        kind = provider_kind(provider.name)
+        entry: dict[str, Any] = {
+            "check": f"provider:{provider.name}",
+            "ready": ready,
+            "model": provider.model,
+            "lineage": provider.lineage,
+            "credential_source": source or "missing",
+        }
+        if kind != "mock":
+            entry["key_management_url"] = KEY_MANAGEMENT_URLS.get(kind)
+            entry.update(
+                rotation_status(
+                    key_rotated_at(resolver, provider.secret_name)
+                    if ready
+                    else None
+                )
+            )
+            entry["reminder"] = entry["reminder"].replace(
+                "<NAME>", provider.secret_name
+            )
+            if check_keys and ready:
+                key = resolver.resolve(provider.secret_name) or ""
+                kwargs: dict[str, Any] = {"endpoint": provider.endpoint}
+                if transport is not None:
+                    kwargs["transport"] = transport
+                entry["key_check"] = check_key(kind, key, **kwargs)
+                del key
+                if entry["key_check"]["status"] == "invalid":
+                    ready = False
+                    entry["ready"] = False
+            elif check_keys:
+                entry["key_check"] = {"status": "skipped", "detail": "no key"}
         all_ready = all_ready and ready
-        checks.append(
-            {
-                "check": f"provider:{provider.name}",
-                "ready": ready,
-                "model": provider.model,
-                "lineage": provider.lineage,
-                "credential_source": source or "missing",
-            }
-        )
+        checks.append(entry)
 
     payload = {
         "ready": all_ready,
@@ -411,7 +456,13 @@ def _doctor(config: AppConfig, *, as_json: bool) -> int:
             provider.name.startswith("mock") for provider in config.providers
         ) else "live",
         "checks": checks,
-        "note": "No network requests were made and no credential values were printed.",
+        "note": (
+            "Key checks made one models-list request per provider; "
+            "no credential values were printed."
+            if check_keys
+            else "No network requests were made and no credential values "
+            "were printed. Use --check-keys to validate keys."
+        ),
     }
     if as_json:
         print(json.dumps(payload, indent=2, sort_keys=True))
@@ -421,6 +472,15 @@ def _doctor(config: AppConfig, *, as_json: bool) -> int:
             marker = "ok" if check["ready"] else "missing"
             detail = check.get("detail") or check.get("credential_source")
             print(f"  [{marker}] {check['check']}: {detail}")
+            if "key_check" in check:
+                print(
+                    f"      key check: {check['key_check']['status']} "
+                    f"({check['key_check']['detail']})"
+                )
+            if check.get("reminder"):
+                print(f"      rotation: {check['reminder']}")
+            if check.get("key_management_url"):
+                print(f"      manage keys: {check['key_management_url']}")
         print(payload["note"])
     return 0 if all_ready else 2
 
@@ -863,7 +923,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             data_lock.acquire()
             _refuse_service_managed_cli(config)
         if args.command == "doctor":
-            return _doctor(config, as_json=args.json)
+            return _doctor(
+                config, as_json=args.json, check_keys=args.check_keys
+            )
         if args.command == "providers":
             payload = [
                 {

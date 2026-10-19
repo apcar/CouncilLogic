@@ -12,6 +12,12 @@ class Provider(ABC):
         self.config = config
         self._api_key = api_key
 
+    def __repr__(self) -> str:
+        return (
+            f"{type(self).__name__}(name={self.config.name!r}, "
+            f"model={self.config.model!r}, api_key='[REDACTED]')"
+        )
+
     @abstractmethod
     def generate(
         self,
@@ -23,3 +29,4 @@ class Provider(ABC):
         timeout_seconds: float | None = None,
     ) -> ProviderResponse:
         """Generate one response without logging or persisting the credential."""
+
