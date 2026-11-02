@@ -20,7 +20,7 @@ from .config import (
 )
 from .engine import CouncilEngine
 from .models import ProviderConfig, RunPolicy
-from .providers.factory import create_provider
+from .providers.factory import create_provider, is_openrouter
 from .run_lock import ServiceLock
 from .keys import (
     KEY_MANAGEMENT_URLS,
@@ -492,13 +492,21 @@ def _doctor(
         else:
             source = resolver.source_for(provider.secret_name)
         ready = source is not None
-        kind = provider_kind(provider.name)
+        kind = (
+            "openrouter" if is_openrouter(provider) else provider_kind(provider.name)
+        )
         entry: dict[str, Any] = {
             "check": f"provider:{provider.name}",
             "ready": ready,
             "model": provider.model,
             "lineage": provider.lineage,
             "credential_source": source or "missing",
+            "credential": (
+                f"{provider.secret_name} present"
+                if ready
+                else f"{provider.secret_name} missing"
+            ),
+            "route": "openrouter" if kind == "openrouter" else "direct",
         }
         if kind != "mock":
             entry["key_management_url"] = KEY_MANAGEMENT_URLS.get(kind)
@@ -549,6 +557,8 @@ def _doctor(
             marker = "ok" if check["ready"] else "missing"
             detail = check.get("detail") or check.get("credential_source")
             print(f"  [{marker}] {check['check']}: {detail}")
+            if check.get("route") == "openrouter":
+                print(f"      via OpenRouter: {check['credential']}")
             if "key_check" in check:
                 print(
                     f"      key check: {check['key_check']['status']} "

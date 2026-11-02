@@ -25,6 +25,7 @@ KEY_MANAGEMENT_URLS = {
     "qwen": "https://modelstudio.console.alibabacloud.com/",
     "cohere": "https://dashboard.cohere.com/api-keys",
     "upstage": "https://console.upstage.ai/api-keys",
+    "openrouter": "https://openrouter.ai/settings/keys",
 }
 
 _MODELS_URLS = {
@@ -35,6 +36,8 @@ _MODELS_URLS = {
     "xai": "https://api.x.ai/v1/models",
     "cohere": "https://api.cohere.ai/v1/models",
     "upstage": "https://api.upstage.ai/v1/models",
+    # Returns key metadata (limits/usage) without spending credits.
+    "openrouter": "https://openrouter.ai/api/v1/key",
 }
 
 ROTATION_DAYS = 90

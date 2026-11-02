@@ -4,7 +4,7 @@ import math
 import os
 import re
 import tomllib
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -90,6 +90,29 @@ ALLOWED_ENDPOINT_HOSTS = {
     "upstage": {"api.upstage.ai"},
     "mock": {"localhost", "127.0.0.1"},
 }
+for _hosts_name in list(ALLOWED_ENDPOINT_HOSTS):
+    if _hosts_name != "mock":
+        ALLOWED_ENDPOINT_HOSTS[_hosts_name] = (
+            ALLOWED_ENDPOINT_HOSTS[_hosts_name] | {"openrouter.ai"}
+        )
+
+OPENROUTER_ENDPOINT = "https://openrouter.ai/api/v1/chat/completions"
+OPENROUTER_SECRET = "OPENROUTER_API_KEY"
+# OpenRouter model ids for each heterogeneous seat. Lineages are unchanged, so
+# routing through one key keeps the same seven independent model families.
+# Verify ids at https://openrouter.ai/models and override per seat with
+# ``openrouter_model`` when a newer release is listed.
+DEFAULT_OPENROUTER_MODELS = {
+    "openai": "openai/gpt-5.6-sol",
+    "anthropic": "anthropic/claude-sonnet-4.6",
+    "gemini": "google/gemini-3.6-flash",
+    "mistral": "mistralai/mistral-medium-3.5",
+    "xai": "x-ai/grok-4.5",
+    "qwen": "qwen/qwen3.7-max",
+    "cohere": "cohere/command-a-plus-05-2026",
+    "upstage": "upstage/solar-pro-3",
+}
+ROUTES = ("direct", "openrouter")
 
 DEFAULT_LIVE_PROVIDER_NAMES = (
     "openai",
@@ -178,12 +201,54 @@ def _default_provider(name: str) -> ProviderConfig:
     )
 
 
+def default_route() -> str:
+    route = os.environ.get("MODEL_COUNCIL_ROUTE", "direct").strip().lower()
+    if route not in ROUTES:
+        raise ValueError("MODEL_COUNCIL_ROUTE must be 'direct' or 'openrouter'")
+    return route
+
+
+def route_via_openrouter(
+    config: ProviderConfig, *, model: str | None = None
+) -> ProviderConfig:
+    """Return the same seat (name, lineage, budgets) sent through OpenRouter."""
+
+    if config.name.startswith("mock"):
+        return config
+    env_model = os.environ.get(
+        f"MODEL_COUNCIL_{config.name.upper()}_OPENROUTER_MODEL"
+    )
+    routed_model = (
+        model
+        or env_model
+        or DEFAULT_OPENROUTER_MODELS.get(config.name)
+        or config.model
+    )
+    # Direct-API tuning keys (thinking_level, enable_thinking, ...) do not apply
+    # to OpenRouter's chat schema; keep only the portable sampling option.
+    extra = {
+        key: value
+        for key, value in config.extra.items()
+        if key in {"temperature", "reasoning", "provider"}
+    }
+    return replace(
+        config,
+        model=routed_model,
+        secret_name=OPENROUTER_SECRET,
+        endpoint=OPENROUTER_ENDPOINT,
+        extra=extra,
+    )
+
+
 def default_config() -> AppConfig:
+    route = default_route()
+    providers = tuple(
+        _default_provider(name) for name in DEFAULT_LIVE_PROVIDER_NAMES
+    )
+    if route == "openrouter":
+        providers = tuple(route_via_openrouter(p) for p in providers)
     return AppConfig(
-        providers=tuple(
-            _default_provider(name)
-            for name in DEFAULT_LIVE_PROVIDER_NAMES
-        ),
+        providers=providers,
         # Seven participants plus three ordered synthesis attempts reserve
         # 17 calls, leaving three application-level recovery calls.
         policy=RunPolicy(max_calls=20, jury_repair_attempts=1),
@@ -348,6 +413,12 @@ def load_config(path: str | Path | None = None) -> AppConfig:
     policy_raw = dict(raw.get("policy") or {})
     provider_raw = dict(raw.get("providers") or {})
 
+    run_route = str(
+        run_raw.get("route", os.environ.get("MODEL_COUNCIL_ROUTE", "direct"))
+    ).strip().lower()
+    if run_route not in ROUTES:
+        raise ValueError("run.route must be 'direct' or 'openrouter'")
+
     providers: list[ProviderConfig] = []
     defaults = {
         name: _default_provider(name)
@@ -399,6 +470,30 @@ def load_config(path: str | Path | None = None) -> AppConfig:
                 **dict(override.get("extra") or {}),
             },
         )
+        seat_route = str(override.get("route", run_route)).strip().lower()
+        if seat_route not in ROUTES:
+            raise ValueError(
+                f"{name}: route must be 'direct' or 'openrouter'"
+            )
+        if seat_route == "openrouter":
+            routed = route_via_openrouter(
+                provider,
+                model=(
+                    str(override["openrouter_model"])
+                    if "openrouter_model" in override
+                    else None
+                ),
+            )
+            provider = replace(
+                routed,
+                secret_name=str(
+                    override.get("openrouter_secret_name", OPENROUTER_SECRET)
+                ),
+                extra={
+                    **routed.extra,
+                    **dict(override.get("openrouter_extra") or {}),
+                },
+            )
         if provider.enabled:
             validate_provider_config(provider)
             providers.append(provider)

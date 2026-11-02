@@ -181,6 +181,38 @@ The exact recovery precedence and operator gates are in
 [Operations](docs/OPERATIONS.md); the availability, privacy, and cost
 boundaries are in [Security](docs/SECURITY.md).
 
+## Keys: BYOK or OpenRouter
+
+CouncilLogic reads keys from environment variables only and never prints or
+stores them. Pick one path:
+
+**Bring your own keys (BYOK).** One key per provider, called directly:
+`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`, `MISTRAL_API_KEY`,
+`XAI_API_KEY`, `DASHSCOPE_API_KEY`, `COHERE_API_KEY`.
+
+**One OpenRouter key.** Every seat keeps its own model family (same seven
+lineages, same independent jury); only the transport changes:
+
+```bash
+export OPENROUTER_API_KEY=...        # from https://openrouter.ai/settings/keys
+export MODEL_COUNCIL_ROUTE=openrouter
+council doctor                       # shows "OPENROUTER_API_KEY present/missing"
+```
+
+Or in `council.toml`: `[run] route = "openrouter"`, with optional per-seat
+`route = "direct"` or `openrouter_model = "openai/..."` overrides. Check
+current model ids at https://openrouter.ai/models.
+
+**Loading from a password manager (Bitwarden example).** Inject the value
+for one command instead of writing it to a file or shell history:
+
+```bash
+# Bitwarden Secrets Manager: maps secrets to env vars for this process only
+bws run -- council run --question "..."
+# or the Bitwarden password-manager CLI
+OPENROUTER_API_KEY="$(bw get password openrouter-api-key)" council doctor
+```
+
 ## Live CLI setup
 
 The default live CLI sends the question and candidate text to all seven

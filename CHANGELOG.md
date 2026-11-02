@@ -2,6 +2,11 @@
 
 All notable public changes to CouncilLogic are recorded here.
 
+
+## Unreleased
+
+- Optional OpenRouter route: one `OPENROUTER_API_KEY` for every seat via `MODEL_COUNCIL_ROUTE=openrouter` or `[run] route`, keeping the heterogeneous lineup. `doctor` reports the key as present/missing without printing it.
+
 ## Unreleased
 
 No changes beyond the prepared `0.3.1a1` candidate.

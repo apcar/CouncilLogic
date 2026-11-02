@@ -3,6 +3,10 @@
 data_dir = "~/.local/share/model-council"
 synthesis_provider = "openai"
 synthesis_fallbacks = ["anthropic", "gemini"]
+# "direct" (BYOK, one key per provider) or "openrouter" (one OPENROUTER_API_KEY;
+# each seat keeps its lineage). Per seat: route = "direct" or
+# openrouter_model = "openai/...".
+# route = "openrouter"
 
 [policy]
 proposal_quorum = 3
