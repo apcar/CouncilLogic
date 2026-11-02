@@ -112,6 +112,16 @@ DEFAULT_OPENROUTER_MODELS = {
     "cohere": "cohere/command-a-plus",
     "upstage": "upstage/solar-pro4",
 }
+# Live 7-seat trial (2026-11-01): reasoning models spent most of the bounded
+# jury budget on hidden reasoning (Cohere 2,320 of 2,821 tokens) and hit
+# finish_reason=length. Bound reasoning per seat via OpenRouter's unified
+# ``reasoning`` parameter so visible output always fits.
+DEFAULT_OPENROUTER_EXTRA = {
+    "cohere": {"reasoning": {"max_tokens": 800}},
+    "qwen": {"reasoning": {"max_tokens": 800}},
+    "xai": {"reasoning": {"effort": "low"}},
+    "gemini": {"reasoning": {"effort": "low"}},
+}
 ROUTES = ("direct", "openrouter")
 
 DEFAULT_LIVE_PROVIDER_NAMES = (
@@ -231,6 +241,7 @@ def route_via_openrouter(
         for key, value in config.extra.items()
         if key in {"temperature", "reasoning", "provider"}
     }
+    extra = {**DEFAULT_OPENROUTER_EXTRA.get(config.name, {}), **extra}
     return replace(
         config,
         model=routed_model,

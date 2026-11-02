@@ -80,6 +80,12 @@ class OpenRouterProviderTests(unittest.TestCase):
         self.assertEqual(body["max_tokens"], 2200)
         self.assertNotIn("enable_thinking", body)
 
+    def test_reasoning_bounded_for_reasoning_seats(self) -> None:
+        t = Transport(ok('{"a":1}'))
+        p = OpenRouterProvider(routed_config("cohere"), FAKE, client=client(t))
+        p.generate(system_prompt="s", user_prompt="u", stage="jury")
+        self.assertEqual(json.loads(t.requests[0].data)["reasoning"], {"max_tokens": 800})
+
     def test_content_filter_is_error(self) -> None:
         t = Transport(ok("", finish="content_filter"))
         p = OpenRouterProvider(routed_config(), FAKE, client=client(t))
@@ -119,7 +125,8 @@ class RoutingConfigTests(unittest.TestCase):
         self.assertEqual(by["openai"].model, "openai/gpt-test")
         self.assertEqual(by["openai"].secret_name, "OPENROUTER_API_KEY")
         self.assertEqual(by["anthropic"].secret_name, "ANTHROPIC_API_KEY")
-        self.assertEqual(by["gemini"].extra, {})
+        self.assertEqual(by["gemini"].extra, {"reasoning": {"effort": "low"}})
+        self.assertEqual(by["cohere"].extra, {"reasoning": {"max_tokens": 800}}) if "cohere" in by else None
 
     def test_bad_route_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
