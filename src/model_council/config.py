@@ -211,6 +211,77 @@ def _default_provider(name: str) -> ProviderConfig:
     )
 
 
+# OpenRouter model ids are "<vendor>/<model>"; the vendor prefix identifies
+# the model family, which must match the seat's declared lineage.
+OPENROUTER_PREFIX_LINEAGES = {
+    "openai": "openai-gpt",
+    "anthropic": "anthropic-claude",
+    "google": "google-gemini",
+    "mistralai": "mistral",
+    "x-ai": "xai-grok",
+    "qwen": "alibaba-qwen",
+    "cohere": "cohere-command",
+    "upstage": "upstage-solar",
+}
+
+
+def _is_openrouter_endpoint(endpoint: str) -> bool:
+    host = (urlparse(endpoint.replace("{model}", "m")).hostname or "").lower()
+    return host == "openrouter.ai" or host.endswith(".openrouter.ai")
+
+
+def lineage_report(
+    providers: tuple[ProviderConfig, ...] | list[ProviderConfig],
+) -> dict[str, Any]:
+    """Verify each seat's lineage against its model identity.
+
+    OpenRouter seats derive their lineage from the model id prefix; a known
+    prefix that disagrees with the declared lineage is a mismatch, an unknown
+    prefix leaves diversity unverified. Two seats sharing one model identity
+    are duplicates. Direct seats are trusted to their configured lineage.
+    """
+
+    mismatches: list[str] = []
+    unverified: list[str] = []
+    seen: dict[str, str] = {}
+    duplicates: list[str] = []
+    lineages: set[str] = set()
+    for provider in providers:
+        lineage = provider.lineage
+        if not provider.name.startswith("mock"):
+            identity = provider.model.strip().lower()
+            if _is_openrouter_endpoint(provider.endpoint):
+                prefix, sep, _rest = identity.partition("/")
+                derived = OPENROUTER_PREFIX_LINEAGES.get(prefix) if sep else None
+                if derived is None:
+                    unverified.append(provider.name)
+                elif derived != provider.lineage:
+                    mismatches.append(
+                        f"{provider.name}: model {provider.model} is "
+                        f"{derived}, not declared {provider.lineage}"
+                    )
+                    lineage = derived
+            if identity in seen:
+                duplicates.append(
+                    f"{provider.name} and {seen[identity]} both use {provider.model}"
+                )
+            else:
+                seen[identity] = provider.name
+        lineages.add(lineage)
+    status = "verified"
+    if unverified:
+        status = "unverified"
+    if mismatches or duplicates:
+        status = "invalid"
+    return {
+        "status": status,
+        "lineage_count": len(lineages),
+        "unverified_providers": unverified,
+        "mismatches": mismatches,
+        "duplicate_models": duplicates,
+    }
+
+
 def default_route() -> str:
     route = os.environ.get("MODEL_COUNCIL_ROUTE", "direct").strip().lower()
     if route not in ROUTES:
@@ -366,7 +437,18 @@ def validate_run_policy(
         raise ValueError("Proposal quorum exceeds enabled provider count")
     if policy.jury_quorum > len(providers):
         raise ValueError("Jury quorum exceeds enabled provider count")
-    lineage_count = len({provider.lineage for provider in providers})
+    diversity = lineage_report(providers)
+    if diversity["mismatches"]:
+        raise ValueError(
+            "OpenRouter model does not match seat lineage: "
+            + "; ".join(diversity["mismatches"])
+        )
+    if diversity["duplicate_models"]:
+        raise ValueError(
+            "Duplicate model identity across seats: "
+            + "; ".join(diversity["duplicate_models"])
+        )
+    lineage_count = diversity["lineage_count"]
     if policy.min_lineages > lineage_count:
         raise ValueError("Configured providers do not meet minimum lineage diversity")
     if synthesis_provider_count < 1:
