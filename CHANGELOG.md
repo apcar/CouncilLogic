@@ -17,6 +17,11 @@ All notable public changes to CouncilLogic are recorded here.
   id prefix (`openai/`, `anthropic/`, `google/`, `mistralai/`, `x-ai/`,
   `qwen/`, `cohere/`, `upstage/`). Mismatches and duplicate model identities
   are rejected; unknown prefixes report diversity as `unverified` in the plan.
+  Duplicate detection normalizes direct and routed ids (direct `gpt-5.6-sol`
+  equals OpenRouter `openai/gpt-5.6-sol`).
+- `council plan` (text and `--json`) and `council approve` show the protocol
+  hash and the lineage diversity status, naming unverified or conflicting
+  seats, before a human confirms spend.
 
 ### Security
 

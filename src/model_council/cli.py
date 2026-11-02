@@ -1023,6 +1023,26 @@ def _agent_command(args: argparse.Namespace) -> int:
     return 0 if reply.get("ok") else 2
 
 
+def _diversity_lines(report: dict[str, Any]) -> list[str]:
+    status = str(report.get("status", "unverified"))
+    lines = [
+        f"Lineage diversity: {status.upper()} "
+        f"({report.get('lineage_count', 0)} lineages)"
+    ]
+    unverified = report.get("unverified_providers") or []
+    if unverified:
+        lines.append(
+            "WARNING: lineage could not be verified for "
+            + ", ".join(unverified)
+            + " (unknown OpenRouter model prefix); diversity is not proven."
+        )
+    for item in report.get("mismatches") or []:
+        lines.append(f"WARNING: lineage mismatch: {item}")
+    for item in report.get("duplicate_models") or []:
+        lines.append(f"WARNING: duplicate model: {item}")
+    return lines
+
+
 def _approve_command(config: AppConfig, args: argparse.Namespace) -> int:
     from .approval import issue_token, plan_record
 
@@ -1055,6 +1075,10 @@ def _approve_command(config: AppConfig, args: argparse.Namespace) -> int:
         f"{estimate['max_input_tokens_upper_bound']} input and <= "
         f"{estimate['max_output_tokens_upper_bound']} output tokens."
     )
+    print(f"Protocol hash: {record['protocol_hash']}")
+    for line in _diversity_lines(record["diversity"]):
+        print(line)
+    sys.stdout.flush()
     prefix = record["plan_hash"][:12]
     answer = input(f"Type {prefix} to approve this spend as {args.approved_by}: ")
     if answer.strip() != prefix:
@@ -1136,11 +1160,16 @@ def main(argv: Sequence[str] | None = None) -> int:
                     "plan_hash": record["plan_hash"],
                     "estimate": record["estimate"],
                     "approval_required": record["approval_required"],
+                    "protocol_hash": record["protocol_hash"],
+                    "diversity": record["diversity"],
                 }
             _print_workload_plan(plan, as_json=args.json)
             if not args.json:
                 estimate = record["estimate"]
                 print(f"Plan hash: {record['plan_hash']}")
+                print(f"Protocol hash: {record['protocol_hash']}")
+                for line in _diversity_lines(record["diversity"]):
+                    print(line)
                 print(
                     f"Estimate: up to {estimate['max_calls']} calls "
                     f"(healthy run {estimate['healthy_run_calls']}), "
