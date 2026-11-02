@@ -18,7 +18,8 @@ import secrets
 from pathlib import Path
 from typing import Any
 
-from .config import AppConfig
+from .config import AppConfig, lineage_report
+from .protocol import protocol_hash
 from .workload import estimate_workload
 
 TOKEN_PREFIX = "cla1."
@@ -70,6 +71,12 @@ def cost_estimate(config: AppConfig, workload: dict[str, Any]) -> dict[str, Any]
     }
 
 
+def _provider_material(provider: Any) -> dict[str, Any]:
+    material = provider.to_dict()
+    material["secret_name"] = str(provider.secret_name)
+    return material
+
+
 def plan_record(config: AppConfig, question: str) -> dict[str, Any]:
     """Return the workload plan, cost estimate and the plan hash binding both."""
 
@@ -82,17 +89,13 @@ def plan_record(config: AppConfig, question: str) -> dict[str, Any]:
     estimate = cost_estimate(config, workload)
     material = {
         "question_sha256": hashlib.sha256(question.encode("utf-8")).hexdigest(),
-        "providers": [
-            {
-                "name": p.name,
-                "model": p.model,
-                "lineage": p.lineage,
-                "endpoint": p.endpoint,
-                "timeout_seconds": p.timeout_seconds,
-                "stage_timeout_seconds": dict(sorted(p.stage_timeout_seconds.items())),
-            }
-            for p in config.providers
-        ],
+        # Bind every execution-relevant provider field: model, lineage,
+        # endpoint/route, credential NAME (never its value), attempts, output
+        # caps, timeouts and provider extras (reasoning, temperature, routing
+        # preferences). Any change forces a fresh human approval.
+        "providers": [_provider_material(p) for p in config.providers],
+        "protocol_hash": protocol_hash(),
+        "diversity": lineage_report(config.providers),
         "synthesis_providers": list(config.synthesis_providers),
         "policy": config.policy.to_dict(),
         "workload": workload,
@@ -105,6 +108,8 @@ def plan_record(config: AppConfig, question: str) -> dict[str, Any]:
         "estimate": estimate,
         "workload": workload,
         "approval_required": estimate["paid"],
+        "protocol_hash": material["protocol_hash"],
+        "diversity": material["diversity"],
     }
 
 
