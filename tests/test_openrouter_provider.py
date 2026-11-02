@@ -44,7 +44,7 @@ class Transport:
 def ok(content: str, finish: str = "stop") -> HttpResponse:
     body = {
         "id": "gen-123",
-        "model": "anthropic/claude-sonnet-4.6",
+        "model": "anthropic/claude-sonnet-5.5",
         "choices": [{"message": {"role": "assistant", "content": content},
                      "finish_reason": finish}],
         "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
@@ -74,7 +74,7 @@ class OpenRouterProviderTests(unittest.TestCase):
         self.assertEqual(req.full_url, OPENROUTER_ENDPOINT)
         self.assertEqual(req.get_header("Authorization"), f"Bearer {FAKE}")
         body = json.loads(req.data)
-        self.assertEqual(body["model"], "anthropic/claude-sonnet-4.6")
+        self.assertEqual(body["model"], "anthropic/claude-sonnet-5.5")
         self.assertEqual(body["response_format"], {"type": "json_object"})
         self.assertIn("JSON", body["messages"][0]["content"])
         self.assertEqual(body["max_tokens"], 2200)

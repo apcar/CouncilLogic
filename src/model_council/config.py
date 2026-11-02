@@ -100,17 +100,17 @@ OPENROUTER_ENDPOINT = "https://openrouter.ai/api/v1/chat/completions"
 OPENROUTER_SECRET = "OPENROUTER_API_KEY"
 # OpenRouter model ids for each heterogeneous seat. Lineages are unchanged, so
 # routing through one key keeps the same seven independent model families.
-# Verify ids at https://openrouter.ai/models and override per seat with
+# Verified against the public list on 2026-11-01. Verify ids at https://openrouter.ai/models and override per seat with
 # ``openrouter_model`` when a newer release is listed.
 DEFAULT_OPENROUTER_MODELS = {
     "openai": "openai/gpt-5.6-sol",
-    "anthropic": "anthropic/claude-sonnet-4.6",
-    "gemini": "google/gemini-3.6-flash",
-    "mistral": "mistralai/mistral-medium-3.5",
-    "xai": "x-ai/grok-4.5",
-    "qwen": "qwen/qwen3.7-max",
-    "cohere": "cohere/command-a-plus-05-2026",
-    "upstage": "upstage/solar-pro-3",
+    "anthropic": "anthropic/claude-sonnet-5.5",
+    "gemini": "google/gemini-3.8-flash",
+    "mistral": "mistralai/mistral-medium-3-5",
+    "xai": "x-ai/grok-4.7",
+    "qwen": "qwen/qwen3.8-max-0902",
+    "cohere": "cohere/command-a-plus",
+    "upstage": "upstage/solar-pro4",
 }
 ROUTES = ("direct", "openrouter")
 
