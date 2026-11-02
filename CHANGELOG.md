@@ -12,7 +12,8 @@ All notable public changes to CouncilLogic are recorded here.
   `openrouter_model` / `openrouter_extra`. Seats keep their names and
   lineages; `doctor` reports the key as present/missing without printing it.
   Hidden reasoning is bounded per seat (Cohere/Qwen 800 tokens, xAI/Gemini
-  low effort) so it cannot exhaust jury output budgets.
+  low effort) to leave room for visible jury output; truncation can still
+  require bounded recovery.
 - Lineage verification for OpenRouter seats: lineage is derived from the model
   id prefix (`openai/`, `anthropic/`, `google/`, `mistralai/`, `x-ai/`,
   `qwen/`, `cohere/`, `upstage/`). Mismatches and duplicate model identities
@@ -33,6 +34,13 @@ All notable public changes to CouncilLogic are recorded here.
   approved again later, and every token remains single-use.
 - `council resume` refuses paid runs that have no recorded human approval.
 - Key-check diagnostics redact the key before truncating the message.
+
+### Release polish
+
+- Preserve vendor namespaces while normalizing direct and OpenRouter model
+  identities, so unrelated models with the same short name remain distinct.
+- Repair the packaged-version CI check for 0.3.1a2, document the complete
+  approval flow and nonce, and label input-token projections as approximate.
 
 ## [0.3.1a1] - 2026-09-11, hardened 2026-10-19
 

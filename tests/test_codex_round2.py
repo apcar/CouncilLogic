@@ -150,6 +150,32 @@ class CrossRouteDuplicateTests(unittest.TestCase):
         self.assertEqual(report["mismatches"], [])
         validate_run_policy(config.policy, seats, synthesis_provider_count=3)
 
+    def test_same_short_name_in_different_vendor_namespaces_is_not_duplicate(self) -> None:
+        config = self._direct()
+        for direct_first in (False, True):
+            with self.subTest(direct_first=direct_first):
+                seats = list(config.providers)
+                seats[0] = replace(
+                    seats[0] if direct_first else route_via_openrouter(seats[0]),
+                    model="shared-name" if direct_first else "openai/shared-name",
+                )
+                seats[1] = replace(
+                    route_via_openrouter(seats[1]), model="anthropic/shared-name"
+                )
+                self.assertEqual(lineage_report(seats)["duplicate_models"], [])
+                validate_run_policy(config.policy, seats, synthesis_provider_count=3)
+
+    def test_direct_gemini_models_prefix_matches_routed_identity(self) -> None:
+        config = self._direct()
+        seats = list(config.providers)
+        seats[2] = replace(seats[2], model="models/gemini-fixture")
+        seats[1] = replace(
+            route_via_openrouter(seats[1]),
+            model="google/gemini-fixture", lineage=seats[2].lineage,
+        )
+        with self.assertRaisesRegex(ValueError, "Duplicate model identity"):
+            validate_run_policy(config.policy, seats, synthesis_provider_count=3)
+
 
 if __name__ == "__main__":
     unittest.main()

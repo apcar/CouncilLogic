@@ -29,4 +29,3 @@ class Provider(ABC):
         timeout_seconds: float | None = None,
     ) -> ProviderResponse:
         """Generate one response without logging or persisting the credential."""
-

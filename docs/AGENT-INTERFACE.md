@@ -86,16 +86,19 @@ accept them.
 1. **Agent: plan.** `{"action": "plan", "question": "..."}` returns
    `plan_hash`, `estimate` (`max_calls`, `healthy_run_calls`,
    `max_input_tokens_upper_bound`, `max_output_tokens_upper_bound`, providers
-   and models) and `approval_required`. No API calls are made. There is no
-   currency figure: multiply the token bounds by each provider's current price.
-2. **Agent → human.** Show the human the question, the estimate and the plan
-   hash, and ask for approval. Do not run anything yet.
+   and models), `protocol_hash`, `diversity`, and `approval_required`. No API
+   calls are made. The legacy field `max_input_tokens_upper_bound` is a rough
+   estimate at four characters per token, not a guaranteed upper bound. There
+   is no currency ceiling; provider tokenization and prices vary.
+2. **Agent → human.** Show the human the question, the estimate, the plan and
+   protocol hashes, and the diversity report, including unverified seats, and
+   ask for approval. Do not run anything yet.
 3. **Human: approve, in a terminal.**
    `council approve --question "..." [same selection flags] --plan-hash HASH --approved-by NAME`
    recomputes the plan, refuses if the hash differs from what was reviewed,
    shows the estimate, and asks the human to retype the first 12 characters of
    the hash. It refuses when stdin is not a terminal. It prints a single-use
-   token `cla1.<hmac>`.
+   token `cla1.<nonce>.<hmac>`.
 4. **Agent: run** with the same question and selection, plus
    `"approved_by": "NAME", "approval_token": "cla1..."`.
 5. **Agent → human.** Report the verdict (winner, vote split, dissent,
@@ -107,11 +110,16 @@ Mock runs (`--mock`, or a config whose providers are all mock) need no approval.
 
 ### What the token binds
 
-The token is `HMAC-SHA256(key, plan_hash ∥ approver ∥ max_calls)`. The key is
+The token authenticates the plan hash, approver, call limit, and a fresh random
+nonce with HMAC-SHA256. A new nonce lets the same plan be approved again after
+its earlier token has been consumed. The key is
 a random 32-byte secret in `<data-dir>/approval.key` (mode 0600), created by
 the first `council approve`. The plan hash covers:
 - the question's SHA-256;
-- every provider's name, model, lineage and endpoint;
+- every field of each provider configuration, including its model, lineage,
+  endpoint, credential name (never its value), retry limit, output caps,
+  timeouts, and extras such as reasoning and routing preferences;
+- the protocol hash and lineage diversity report;
 - the synthesis chain;
 - the full run policy (including `max_calls`, deadlines and output and recovery limits);
 - the workload projection and estimate.
@@ -123,6 +131,9 @@ be reused, even with the same idempotency key) and linked to the run as a
 `human_run_approval` event. The token itself is never stored in the run
 record, only its SHA-256. A token that was computed but never issued by
 `council approve` is refused.
+
+Paid CLI resumes require a consumed approval attached to the stored run. Mock
+runs remain exempt. The HTTP service has its separate mock-only boundary.
 
 ## Why `decide` and `approve` are human-only
 

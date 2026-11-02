@@ -85,7 +85,7 @@ jobs:
         run: |
           python -m venv /tmp/model-council-wheel
           /tmp/model-council-wheel/bin/python -m pip install --disable-pip-version-check dist/*.whl
-          /tmp/model-council-wheel/bin/python -c 'from importlib.metadata import version; import model_council; assert version("model-council") == model_council.__version__ == "0.3.1a1"'
+          /tmp/model-council-wheel/bin/python -c 'from importlib.metadata import version; import model_council; assert version("model-council") == model_council.__version__'
           /tmp/model-council-wheel/bin/council --version
       - name: Credential-free mock smoke test
         run: |

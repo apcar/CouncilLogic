@@ -183,15 +183,17 @@ boundaries are in [Security](docs/SECURITY.md).
 
 ## Keys: BYOK or OpenRouter
 
-CouncilLogic reads keys from environment variables only and never prints or
-stores them. Pick one path:
+CouncilLogic resolves provider keys from the environment, macOS Keychain,
+1Password, or a configured secret command. It keeps credential values out of
+run records and normal diagnostic output. Pick a provider route:
 
 **Bring your own keys (BYOK).** One key per provider, called directly:
 `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`, `MISTRAL_API_KEY`,
 `XAI_API_KEY`, `DASHSCOPE_API_KEY`, `COHERE_API_KEY`.
 
-**One OpenRouter key.** Every seat keeps its own model family (same seven
-lineages, same independent jury); only the transport changes:
+**One OpenRouter key.** The default lineup retains seven model families,
+with each seat making its own proposal and jury assessment. OpenRouter
+receives every routed prompt; its key, billing, and availability are shared:
 
 ```bash
 export OPENROUTER_API_KEY=...        # from https://openrouter.ai/settings/keys
@@ -201,14 +203,19 @@ council doctor                       # shows "OPENROUTER_API_KEY present/missing
 
 Or in `council.toml`: `[run] route = "openrouter"`, with optional per-seat
 `route = "direct"` or `openrouter_model = "openai/..."` overrides. Check
-current model ids at https://openrouter.ai/models.
+current model ids at [OpenRouter models](https://openrouter.ai/models).
+Known model prefixes must match the seat's declared lineage, and duplicate
+model identities are rejected across direct and routed seats. Unknown prefixes
+are shown as unverified before approval. Direct seats use their declared
+lineage; this is configuration validation, not independent proof of a backend's
+model identity.
 
 **Loading from a password manager (Bitwarden example).** Inject the value
 for one command instead of writing it to a file or shell history:
 
 ```bash
 # Bitwarden Secrets Manager: maps secrets to env vars for this process only
-bws run -- council run --question "..."
+bws run -- council doctor
 # or the Bitwarden password-manager CLI
 OPENROUTER_API_KEY="$(bw get password openrouter-api-key)" council doctor
 ```
@@ -231,7 +238,10 @@ export COHERE_API_KEY="..."
 council doctor
 council providers
 council plan --file ./work/private-question.md
-council run --question "Your decision question"
+# Review the plan, then substitute its hash below. Approval needs a terminal.
+council approve --file ./work/private-question.md --plan-hash PLAN_HASH --approved-by "Your name"
+# Substitute the single-use token printed by approve; keep the same file and selection.
+council run --file ./work/private-question.md --approved-by "Your name" --approval-token TOKEN
 council decide RUN_ID --accept --note "Why I accept (or --reject / --defer)"
 ```
 
@@ -239,6 +249,8 @@ Paid runs require a human-approved plan: `council plan --json` gives a plan
 hash and call/token estimate, a human runs `council approve` for that plan,
 and `council run` must present the matching single-use token
 (`--approved-by NAME --approval-token TOKEN`). Mock runs need no approval.
+The input-token figure uses a character-based approximation, not a hard token
+or currency ceiling. Calls and configured output limits are enforced separately.
 Agents can use `council agent` (JSON) or `council-mcp` (MCP over stdio), but
 not `approve` or `decide`; see [Agent interface](docs/AGENT-INTERFACE.md).
 

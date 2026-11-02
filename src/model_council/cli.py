@@ -1071,8 +1071,8 @@ def _approve_command(config: AppConfig, args: argparse.Namespace) -> int:
         + ", ".join(f"{p['name']} ({p['model']})" for p in estimate["providers"])
     )
     print(
-        f"Up to {estimate['max_calls']} paid calls, <= "
-        f"{estimate['max_input_tokens_upper_bound']} input and <= "
+        f"Up to {estimate['max_calls']} paid logical calls, approximately "
+        f"{estimate['max_input_tokens_upper_bound']} input tokens and <= "
         f"{estimate['max_output_tokens_upper_bound']} output tokens."
     )
     print(f"Protocol hash: {record['protocol_hash']}")
@@ -1173,7 +1173,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 print(
                     f"Estimate: up to {estimate['max_calls']} calls "
                     f"(healthy run {estimate['healthy_run_calls']}), "
-                    f"<= {estimate['max_input_tokens_upper_bound']} input and "
+                    f"approximately {estimate['max_input_tokens_upper_bound']} input tokens and "
                     f"<= {estimate['max_output_tokens_upper_bound']} output tokens"
                 )
                 print(

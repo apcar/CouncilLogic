@@ -36,7 +36,7 @@ def _canonical(value: Any) -> str:
 
 
 def cost_estimate(config: AppConfig, workload: dict[str, Any]) -> dict[str, Any]:
-    """Upper-bound call and token estimate. No currency: prices change."""
+    """Call/output limits and approximate input tokens; no currency ceiling."""
 
     mandatory = int(workload.get("mandatory_calls") or 0)
     recovery = int(workload.get("recovery_call_capacity") or 0)
@@ -64,9 +64,10 @@ def cost_estimate(config: AppConfig, workload: dict[str, Any]) -> dict[str, Any]
         "max_output_tokens_upper_bound": max_calls * largest_output,
         "currency_estimate": None,
         "note": (
-            "Upper bounds from protocol prompt sizes and configured output "
-            "caps (about 4 characters per token). Multiply by each "
-            "provider's current price; CouncilLogic does not track prices."
+            "Call and output figures use configured limits. The legacy "
+            "max_input_tokens_upper_bound field is an approximation at 4 "
+            "characters per token, not a guaranteed upper bound. Provider "
+            "tokenization and prices vary; this is not a currency ceiling."
         ),
     }
 

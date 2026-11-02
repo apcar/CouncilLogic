@@ -115,7 +115,8 @@ DEFAULT_OPENROUTER_MODELS = {
 # Live 7-seat trial (2026-11-01): reasoning models spent most of the bounded
 # jury budget on hidden reasoning (Cohere 2,320 of 2,821 tokens) and hit
 # finish_reason=length. Bound reasoning per seat via OpenRouter's unified
-# ``reasoning`` parameter so visible output always fits.
+# ``reasoning`` parameter to leave more room for visible output. Truncation
+# can still require bounded recovery.
 DEFAULT_OPENROUTER_EXTRA: dict[str, dict[str, Any]] = {
     "cohere": {"reasoning": {"max_tokens": 800}},
     "qwen": {"reasoning": {"max_tokens": 800}},
@@ -242,20 +243,19 @@ def model_identity(provider: ProviderConfig) -> str:
     """Route-independent model identity used for duplicate detection.
 
     Direct ``gpt-5.6-sol`` and OpenRouter ``openai/gpt-5.6-sol`` normalize to
-    the same identity: any vendor prefix is stripped and the bare model id is
-    compared case-insensitively.
+    the same vendor-qualified identity, compared case-insensitively. Preserve
+    the namespace: different vendors can use the same short model name.
     """
 
     model = provider.model.strip().lower()
     if _is_openrouter_endpoint(provider.endpoint):
-        _prefix, sep, rest = model.partition("/")
-        return rest if sep else model
-    prefix = DIRECT_PROVIDER_PREFIXES.get(provider.name)
-    if prefix and model.startswith(prefix + "/"):
+        return model
+    prefix = DIRECT_PROVIDER_PREFIXES.get(provider.name, provider.name)
+    if model.startswith(prefix + "/"):
         model = model[len(prefix) + 1:]
     if model.startswith("models/"):
         model = model[len("models/"):]
-    return model
+    return f"{prefix}/{model}"
 
 
 def _is_openrouter_endpoint(endpoint: str) -> bool:
