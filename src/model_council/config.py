@@ -116,7 +116,7 @@ DEFAULT_OPENROUTER_MODELS = {
 # jury budget on hidden reasoning (Cohere 2,320 of 2,821 tokens) and hit
 # finish_reason=length. Bound reasoning per seat via OpenRouter's unified
 # ``reasoning`` parameter so visible output always fits.
-DEFAULT_OPENROUTER_EXTRA = {
+DEFAULT_OPENROUTER_EXTRA: dict[str, dict[str, Any]] = {
     "cohere": {"reasoning": {"max_tokens": 800}},
     "qwen": {"reasoning": {"max_tokens": 800}},
     "xai": {"reasoning": {"effort": "low"}},
