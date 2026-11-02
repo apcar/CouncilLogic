@@ -94,7 +94,7 @@ def check_key(
     except (ValueError, AttributeError):
         message = None
     if isinstance(message, str):
-        detail += ": " + redact(message[:200], key)
+        detail += ": " + redact(message, key)[:200]
     return {"status": "error", "detail": detail}
 
 
