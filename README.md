@@ -48,8 +48,9 @@ The fastest review path is to run the
 [security model](docs/SECURITY.md), [operations runbook](docs/OPERATIONS.md),
 and [research boundaries](docs/RESEARCH.md).
 
-This checkout prepares **public alpha (`0.3.1a2`)** for release; publication is
-pending. CouncilLogic remains experimental. Multiple models can share the same
+This checkout prepares **public alpha (`0.4.0a1`)** for release; publication is
+pending. See the [0.4.0a1 release notes and upgrade guide](docs/releases/0.4.0a1.md).
+CouncilLogic remains experimental. Multiple models can share the same
 error. Verify consequential claims against primary sources.
 
 ## What is—and is not—new
@@ -298,7 +299,7 @@ a publication boundary, not a roadmap or availability claim.
 ## Experimental service boundary
 
 > [!WARNING]
-> The `0.3.1a2` candidate retains the frozen `0.2.0a1` HTTP service profile.
+> The `0.4.0a1` candidate retains the frozen `0.2.0a1` HTTP service profile.
 > It is **mock-only and loopback-only** and cannot construct live-provider
 > adapters. Do not bind it to a non-loopback address, place it behind a tunnel
 > or remote front door, enable either work principal, or use it for production

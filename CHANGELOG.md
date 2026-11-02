@@ -3,7 +3,29 @@
 All notable public changes to CouncilLogic are recorded here.
 
 
-## [0.3.1a2] - 2026-11-01 (local candidate, unpublished)
+## [0.4.0a1] - Unreleased
+
+This release prepares human-governed agent execution: a person approves the
+paid plan, agents can request bounded council work, and a person records the
+final decision. It includes the local 0.3.1a2 candidate work; that candidate
+was not published as a GitHub release.
+
+### Agent execution and human decisions
+
+- JSON agent and MCP interfaces support planning, approved execution,
+  asynchronous start, status, and request-id replay without starting a second run.
+- Human-only CLI approval issues a plan-bound, single-use token for paid runs.
+  Agents cannot approve spending through the agent or MCP interface.
+- Human verdicts are appended to a hash-chained decision ledger; later decisions
+  supersede earlier ones without overwriting them.
+- Protocol 1.3.0-beta adds random untrusted-data delimiters, a synthesis check
+  against the deterministic jury result, and self-vote reporting.
+- Keychain, 1Password, and secret-command key sources supplement environment
+  variables. Optional separate-user entry points isolate agent access.
+
+These are additions to the seven-provider council and bounded recovery already
+published in 0.3.0a1. See [release notes](docs/releases/0.4.0a1.md) for the
+upgrade procedure and explicit limits.
 
 ### Added
 
@@ -39,7 +61,7 @@ All notable public changes to CouncilLogic are recorded here.
 
 - Preserve vendor namespaces while normalizing direct and OpenRouter model
   identities, so unrelated models with the same short name remain distinct.
-- Repair the packaged-version CI check for 0.3.1a2, document the complete
+- Repair the packaged-version CI check, document the complete
   approval flow and nonce, and label input-token projections as approximate.
 
 ## [0.3.1a1] - 2026-09-11, hardened 2026-10-19

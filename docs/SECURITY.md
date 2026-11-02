@@ -2,7 +2,7 @@
 
 ## Public-alpha posture
 
-The CouncilLogic `0.3.1a2` release candidate retains the hardened, governed
+The CouncilLogic `0.4.0a1` release candidate retains the hardened, governed
 `0.2.0a1` mock-service profile alongside the single-user live CLI. The service is mock-only,
 loopback-only, and must not be exposed as a public network daemon. It has
 application-level multi-principal controls, but it is not a production

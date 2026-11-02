@@ -20,8 +20,10 @@ class ReleaseMetadataTests(unittest.TestCase):
         citation = (ROOT / "CITATION.cff").read_text("utf-8")
         readme = (ROOT / "README.md").read_text("utf-8")
         changelog = (ROOT / "CHANGELOG.md").read_text("utf-8")
+        release_notes = (ROOT / "docs/releases/0.4.0a1.md").read_text("utf-8")
+        security = (ROOT / "docs/SECURITY.md").read_text("utf-8")
 
-        self.assertEqual(PACKAGE_VERSION, "0.3.1a2")
+        self.assertEqual(PACKAGE_VERSION, "0.4.0a1")
         self.assertEqual(__version__, PACKAGE_VERSION)
         self.assertEqual(project["project"]["version"], PACKAGE_VERSION)
         self.assertRegex(
@@ -30,6 +32,9 @@ class ReleaseMetadataTests(unittest.TestCase):
         )
         self.assertIn(f"public alpha (`{PACKAGE_VERSION}`)", readme)
         self.assertIn(f"## [{PACKAGE_VERSION}]", changelog)
+        self.assertIn(f"# CouncilLogic {PACKAGE_VERSION}", release_notes)
+        self.assertIn(f"`{PACKAGE_VERSION}` release candidate", security)
+        self.assertIn("docs/releases/0.4.0a1.md", readme)
 
     def test_independently_versioned_surfaces_remain_explicit(self) -> None:
         self.assertEqual(PROTOCOL_ID, "independent-jury")

@@ -21,3 +21,4 @@ include docs/adr/0002-agpl-and-commercial-licensing.md
 include docs/assets/councillogic-header.svg
 include examples/mock-governance-proof/README.md
 include scripts/gate1_mock_soak.py
+include docs/releases/0.4.0a1.md
