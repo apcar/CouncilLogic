@@ -21,7 +21,7 @@ class ReleaseMetadataTests(unittest.TestCase):
         readme = (ROOT / "README.md").read_text("utf-8")
         changelog = (ROOT / "CHANGELOG.md").read_text("utf-8")
 
-        self.assertEqual(PACKAGE_VERSION, "0.3.1a1")
+        self.assertEqual(PACKAGE_VERSION, "0.3.1a2")
         self.assertEqual(__version__, PACKAGE_VERSION)
         self.assertEqual(project["project"]["version"], PACKAGE_VERSION)
         self.assertRegex(

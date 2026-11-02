@@ -6,8 +6,8 @@ authors:
   - family-names: "Greene"
     given-names: "Andrew"
 # Prepared release metadata; publication is pending.
-version: 0.3.1a1
-date-released: 2026-09-11
+version: 0.3.1a2
+date-released: 2026-11-01
 url: "https://github.com/apcar/CouncilLogic"
 repository-code: "https://github.com/apcar/CouncilLogic"
 license: AGPL-3.0-only

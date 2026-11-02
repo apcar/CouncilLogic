@@ -3,13 +3,31 @@
 All notable public changes to CouncilLogic are recorded here.
 
 
-## Unreleased
+## [0.3.1a2] - 2026-11-01 (local candidate, unpublished)
 
-- Optional OpenRouter route: one `OPENROUTER_API_KEY` for every seat via `MODEL_COUNCIL_ROUTE=openrouter` or `[run] route`, keeping the heterogeneous lineup. `doctor` reports the key as present/missing without printing it.
+### Added
 
-## Unreleased
+- Optional OpenRouter route: one `OPENROUTER_API_KEY` for every seat via
+  `MODEL_COUNCIL_ROUTE=openrouter`, `[run] route`, or per-seat `route` /
+  `openrouter_model` / `openrouter_extra`. Seats keep their names and
+  lineages; `doctor` reports the key as present/missing without printing it.
+  Hidden reasoning is bounded per seat (Cohere/Qwen 800 tokens, xAI/Gemini
+  low effort) so it cannot exhaust jury output budgets.
+- Lineage verification for OpenRouter seats: lineage is derived from the model
+  id prefix (`openai/`, `anthropic/`, `google/`, `mistralai/`, `x-ai/`,
+  `qwen/`, `cohere/`, `upstage/`). Mismatches and duplicate model identities
+  are rejected; unknown prefixes report diversity as `unverified` in the plan.
 
-No changes beyond the prepared `0.3.1a1` candidate.
+### Security
+
+- The approval plan hash now binds every execution-relevant provider setting
+  (model, lineage, endpoint/route, credential *name*, attempts, per-stage
+  output caps, timeouts, reasoning/temperature/provider extras) plus the
+  protocol hash. Any change requires a fresh human approval.
+- Each approval token carries a random nonce: an identical plan can be
+  approved again later, and every token remains single-use.
+- `council resume` refuses paid runs that have no recorded human approval.
+- Key-check diagnostics redact the key before truncating the message.
 
 ## [0.3.1a1] - 2026-09-11, hardened 2026-10-19
 
