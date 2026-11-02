@@ -225,6 +225,39 @@ OPENROUTER_PREFIX_LINEAGES = {
 }
 
 
+# Direct provider seat -> the OpenRouter vendor prefix for the same models.
+DIRECT_PROVIDER_PREFIXES = {
+    "openai": "openai",
+    "anthropic": "anthropic",
+    "gemini": "google",
+    "mistral": "mistralai",
+    "xai": "x-ai",
+    "qwen": "qwen",
+    "cohere": "cohere",
+    "upstage": "upstage",
+}
+
+
+def model_identity(provider: ProviderConfig) -> str:
+    """Route-independent model identity used for duplicate detection.
+
+    Direct ``gpt-5.6-sol`` and OpenRouter ``openai/gpt-5.6-sol`` normalize to
+    the same identity: any vendor prefix is stripped and the bare model id is
+    compared case-insensitively.
+    """
+
+    model = provider.model.strip().lower()
+    if _is_openrouter_endpoint(provider.endpoint):
+        _prefix, sep, rest = model.partition("/")
+        return rest if sep else model
+    prefix = DIRECT_PROVIDER_PREFIXES.get(provider.name)
+    if prefix and model.startswith(prefix + "/"):
+        model = model[len(prefix) + 1:]
+    if model.startswith("models/"):
+        model = model[len("models/"):]
+    return model
+
+
 def _is_openrouter_endpoint(endpoint: str) -> bool:
     host = (urlparse(endpoint.replace("{model}", "m")).hostname or "").lower()
     return host == "openrouter.ai" or host.endswith(".openrouter.ai")
@@ -249,9 +282,9 @@ def lineage_report(
     for provider in providers:
         lineage = provider.lineage
         if not provider.name.startswith("mock"):
-            identity = provider.model.strip().lower()
+            identity = model_identity(provider)
             if _is_openrouter_endpoint(provider.endpoint):
-                prefix, sep, _rest = identity.partition("/")
+                prefix, sep, _rest = provider.model.strip().lower().partition("/")
                 derived = OPENROUTER_PREFIX_LINEAGES.get(prefix) if sep else None
                 if derived is None:
                     unverified.append(provider.name)
