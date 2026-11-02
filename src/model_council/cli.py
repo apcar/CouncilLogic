@@ -1184,6 +1184,15 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 0 if result["status"] == "completed" else 3
         if args.command == "resume":
             config = _locked_resume_config(config, args.run_id)
+            from .approval import is_paid
+
+            if is_paid(config) and _store(config).run_approval_for(args.run_id) is None:
+                print(
+                    "council: Resume refused: this paid run has no recorded "
+                    "human approval. Start a new approved run instead.",
+                    file=sys.stderr,
+                )
+                return 4
             result = _engine(config).resume(args.run_id)
             _print_result(result, as_json=args.json)
             return 0 if result["status"] == "completed" else 3

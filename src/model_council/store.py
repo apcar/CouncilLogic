@@ -563,6 +563,17 @@ class CouncilStore:
             "consumed_at": consumed_at,
         }
 
+    def run_approval_for(self, run_id: str) -> dict[str, Any] | None:
+        """Return the consumed human approval attached to a run, if any."""
+
+        with self.connection() as connection:
+            row = connection.execute(
+                "SELECT * FROM run_approvals WHERE run_id = ? "
+                "AND consumed_at IS NOT NULL ORDER BY approved_at LIMIT 1",
+                (run_id,),
+            ).fetchone()
+        return None if row is None else dict(row)
+
     def attach_run_approval(self, token_sha256: str, run_id: str) -> None:
         with self._write_transaction() as connection:
             connection.execute(
