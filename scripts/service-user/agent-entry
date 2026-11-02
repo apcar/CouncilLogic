@@ -1,0 +1,19 @@
+#!/bin/sh
+# CouncilLogic agent entry point. Installed root-owned (0755) at
+# /usr/local/libexec/councillogic/agent-entry and run ONLY via sudo as the
+# councillogic service user. It ignores the caller's environment and accepts
+# exactly one argument: "agent" (one JSON request on stdin) or "mcp" (MCP stdio).
+set -eu
+umask 077
+PREFIX=/opt/councillogic
+STATE=/var/lib/councillogic
+case "${1:-}" in
+  agent) set -- "$PREFIX/venv/bin/council" --data-dir "$STATE/data" agent ;;
+  mcp)   set -- "$PREFIX/venv/bin/council-mcp" --data-dir "$STATE/data" ;;
+  *) echo "usage: agent-entry agent|mcp" >&2; exit 64 ;;
+esac
+[ "$#" -ge 1 ] || exit 64
+exec /usr/bin/env -i \
+  HOME="$STATE" PATH=/usr/bin:/bin LANG=C.UTF-8 \
+  MODEL_COUNCIL_SECRET_COMMAND=/usr/local/libexec/councillogic/read-key \
+  "$@"

@@ -2,14 +2,116 @@
 
 All notable public changes to CouncilLogic are recorded here.
 
-## Unreleased
 
-No changes beyond the prepared `0.3.1a1` candidate.
+## [0.4.0a1] - Unreleased
 
-## [0.3.1a1] - 2026-09-11
+This release prepares human-governed agent execution: a person approves the
+paid plan, agents can request bounded council work, and a person records the
+final decision. It includes the local 0.3.1a2 candidate work; that candidate
+was not published as a GitHub release.
+
+### Agent execution and human decisions
+
+- JSON agent and MCP interfaces support planning, approved execution,
+  asynchronous start, status, and request-id replay without starting a second run.
+- Human-only CLI approval issues a plan-bound, single-use token for paid runs.
+  Agents cannot approve spending through the agent or MCP interface.
+- Human verdicts are appended to a hash-chained decision ledger; later decisions
+  supersede earlier ones without overwriting them.
+- Protocol 1.3.0-beta adds random untrusted-data delimiters, a synthesis check
+  against the deterministic jury result, and self-vote reporting.
+- Keychain, 1Password, and secret-command key sources supplement environment
+  variables. Optional separate-user entry points isolate agent access.
+
+These are additions to the seven-provider council and bounded recovery already
+published in 0.3.0a1. See [release notes](docs/releases/0.4.0a1.md) for the
+upgrade procedure and explicit limits.
+
+### Added
+
+- Optional OpenRouter route: one `OPENROUTER_API_KEY` for every seat via
+  `MODEL_COUNCIL_ROUTE=openrouter`, `[run] route`, or per-seat `route` /
+  `openrouter_model` / `openrouter_extra`. Seats keep their names and
+  lineages; `doctor` reports the key as present/missing without printing it.
+  Hidden reasoning is bounded per seat (Cohere/Qwen 800 tokens, xAI/Gemini
+  low effort) to leave room for visible jury output; truncation can still
+  require bounded recovery.
+- Lineage verification for OpenRouter seats: lineage is derived from the model
+  id prefix (`openai/`, `anthropic/`, `google/`, `mistralai/`, `x-ai/`,
+  `qwen/`, `cohere/`, `upstage/`). Mismatches and duplicate model identities
+  are rejected; unknown prefixes report diversity as `unverified` in the plan.
+  Duplicate detection normalizes direct and routed ids (direct `gpt-5.6-sol`
+  equals OpenRouter `openai/gpt-5.6-sol`).
+- `council plan` (text and `--json`) and `council approve` show the protocol
+  hash and the lineage diversity status, naming unverified or conflicting
+  seats, before a human confirms spend.
+
+### Security
+
+- The approval plan hash now binds every execution-relevant provider setting
+  (model, lineage, endpoint/route, credential *name*, attempts, per-stage
+  output caps, timeouts, reasoning/temperature/provider extras) plus the
+  protocol hash. Any change requires a fresh human approval.
+- Each approval token carries a random nonce: an identical plan can be
+  approved again later, and every token remains single-use.
+- `council resume` refuses paid runs that have no recorded human approval.
+- Key-check diagnostics redact the key before truncating the message.
+
+### Release polish
+
+- Preserve vendor namespaces while normalizing direct and OpenRouter model
+  identities, so unrelated models with the same short name remain distinct.
+- Repair the packaged-version CI check, document the complete
+  approval flow and nonce, and label input-token projections as approximate.
+
+## [0.3.1a1] - 2026-09-11, hardened 2026-10-19
 
 Prepared locally for release. Publication and current provider availability
 are not established by this candidate.
+
+### Hardening (2026-10-19)
+
+- `council decide RUN_ID --accept|--reject|--defer --note TEXT` records the
+  human final decision in a new append-only, hash-chained `human_decisions`
+  table (schema 2; SQLite triggers reject UPDATE and DELETE). `run`, `resume`
+  and `inspect` lead with the deterministic winner, vote split, dissent and
+  self-vote check, then show *Awaiting human decision* or the latest decision.
+  `inspect --json` and `export` include every decision.
+- Protocol `1.3.0-beta`: untrusted data is wrapped in random per-run
+  delimiters (`secrets.token_hex`), persisted so resume rebuilds identical
+  prompts. The synthesizer must name the aggregate outcome first in Outcome,
+  and the engine checks it: a missing section, wrong winner, invented tie or
+  invented winner marks the run degraded and is recorded as `synthesis_check`.
+- Results include `self_votes`: jurors that ranked their own candidate first,
+  plus the Borda result with every juror's own candidate removed, and whether
+  that changes the outcome.
+- Optional key sources: macOS Keychain (`MODEL_COUNCIL_KEYCHAIN_SERVICE`) and
+  1Password (`<KEY>_OP_REF=op://...`), before the environment, with no Python
+  dependencies. `council doctor` shows each key's source, age, a rotation
+  reminder and the provider's key page; `--check-keys` validates with one free
+  models-list call. Provider `repr` redacts keys. See `docs/KEYS.md`.
+- Agent interface: `council agent` (one JSON request in, one JSON reply out)
+  and a stdlib-only MCP server `council-mcp` (stdio JSON-RPC) with plan, run,
+  inspect, list and capabilities. Every run reply ends with "Awaiting human
+  decision". `decide` and `approve` are human-only and not exposed to agents.
+  See `docs/AGENT-INTERFACE.md` and `docs/skills/councillogic/SKILL.md`.
+- Paid runs require human approval: `council plan --json` reports a plan hash
+  and call/token estimate; `council approve` (interactive terminal only)
+  issues a single-use HMAC token bound to that plan hash, estimate and
+  approver; `council run` refuses paid runs without a matching, unused token
+  (exit 4). Schema 3 adds the `run_approvals` table. Mock runs are exempt.
+- Agent schema v1 (`docs/agent-schema/v1/`, locked by tests): every reply has
+  `schema_version`, `action`, `ok`; unknown request fields are rejected.
+  `request_id` makes `run`/`start` retries return the same run (schema 4
+  `agent_requests`); a reused id with a different payload is an error.
+  `deadline_seconds` and `call_timeout_seconds` (also `--call-timeout-seconds`)
+  bound runs and are part of the plan hash. `start` runs in the background and
+  `status` reports progress; `council-mcp` sends `notifications/progress`
+  when given a progress token.
+- Optional separate OS user install (`docs/SEPARATE-USER.md`,
+  `scripts/service-user/`, dry-run by default) for Linux and macOS.
+- CI adds a ruff and mypy gate; type errors it found are fixed (including
+  `os.sys.stderr` in two error paths).
 
 ### Added
 

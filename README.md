@@ -28,11 +28,19 @@ CouncilLogic is a working expression of how I approach AI systems: separate
 judgment from authority, make disagreement visible, bound work and failure
 before execution, and preserve a record another operator can inspect.
 
+**A human makes the final decision.** The council only advises. Every run
+ends in the state *Awaiting human decision*, and nothing is decided until a
+person records `council decide RUN_ID --accept|--reject|--defer --note TEXT`.
+That record is permanent: decisions are appended to a hash-chained ledger that
+SQLite triggers protect from update or deletion, and a later decision
+supersedes an earlier one without erasing it.
+
 | Principle | Implemented evidence |
 |---|---|
+| Human final authority | `council run` leads with the deterministic winner, vote split, dissent, and self-vote check, then *Awaiting human decision*; `council decide` writes the permanent decision record. |
 | Separate judgment from authority | Distinct provider/model lineages answer independently; models receive no tools or permission to act. |
 | Define limits before execution | Prompt growth, logical calls, concurrency, deadlines, output, and recovery are bounded by policy. |
-| Preserve uncertainty | Metadata-blind juries, deterministic aggregation, abstentions, ties, disagreement, and degraded completion remain visible. |
+| Preserve uncertainty | Metadata-blind juries, deterministic aggregation, abstentions, ties, disagreement, self-votes (with and without), and degraded completion remain visible. A synthesis whose Outcome contradicts the aggregate marks the run degraded. |
 | Make operation inspectable | Proposals, juries, failures, recoveries, policy, aggregate, and synthesis are durably recorded and exportable. |
 
 The fastest review path is to run the
@@ -40,8 +48,9 @@ The fastest review path is to run the
 [security model](docs/SECURITY.md), [operations runbook](docs/OPERATIONS.md),
 and [research boundaries](docs/RESEARCH.md).
 
-This checkout prepares **public alpha (`0.3.1a1`)** for release; publication is
-pending. CouncilLogic remains experimental. Multiple models can share the same
+This checkout prepares **public alpha (`0.4.0a1`)** for release; publication is
+pending. See the [0.4.0a1 release notes and upgrade guide](docs/releases/0.4.0a1.md).
+CouncilLogic remains experimental. Multiple models can share the same
 error. Verify consequential claims against primary sources.
 
 ## What is—and is not—new
@@ -173,6 +182,45 @@ The exact recovery precedence and operator gates are in
 [Operations](docs/OPERATIONS.md); the availability, privacy, and cost
 boundaries are in [Security](docs/SECURITY.md).
 
+## Keys: BYOK or OpenRouter
+
+CouncilLogic resolves provider keys from the environment, macOS Keychain,
+1Password, or a configured secret command. It keeps credential values out of
+run records and normal diagnostic output. Pick a provider route:
+
+**Bring your own keys (BYOK).** One key per provider, called directly:
+`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`, `MISTRAL_API_KEY`,
+`XAI_API_KEY`, `DASHSCOPE_API_KEY`, `COHERE_API_KEY`.
+
+**One OpenRouter key.** The default lineup retains seven model families,
+with each seat making its own proposal and jury assessment. OpenRouter
+receives every routed prompt; its key, billing, and availability are shared:
+
+```bash
+export OPENROUTER_API_KEY=...        # from https://openrouter.ai/settings/keys
+export MODEL_COUNCIL_ROUTE=openrouter
+council doctor                       # shows "OPENROUTER_API_KEY present/missing"
+```
+
+Or in `council.toml`: `[run] route = "openrouter"`, with optional per-seat
+`route = "direct"` or `openrouter_model = "openai/..."` overrides. Check
+current model ids at [OpenRouter models](https://openrouter.ai/models).
+Known model prefixes must match the seat's declared lineage, and duplicate
+model identities are rejected across direct and routed seats. Unknown prefixes
+are shown as unverified before approval. Direct seats use their declared
+lineage; this is configuration validation, not independent proof of a backend's
+model identity.
+
+**Loading from a password manager (Bitwarden example).** Inject the value
+for one command instead of writing it to a file or shell history:
+
+```bash
+# Bitwarden Secrets Manager: maps secrets to env vars for this process only
+bws run -- council doctor
+# or the Bitwarden password-manager CLI
+OPENROUTER_API_KEY="$(bw get password openrouter-api-key)" council doctor
+```
+
 ## Live CLI setup
 
 The default live CLI sends the question and candidate text to all seven
@@ -191,8 +239,26 @@ export COHERE_API_KEY="..."
 council doctor
 council providers
 council plan --file ./work/private-question.md
-council run --question "Your decision question"
+# Review the plan, then substitute its hash below. Approval needs a terminal.
+council approve --file ./work/private-question.md --plan-hash PLAN_HASH --approved-by "Your name"
+# Substitute the single-use token printed by approve; keep the same file and selection.
+council run --file ./work/private-question.md --approved-by "Your name" --approval-token TOKEN
+council decide RUN_ID --accept --note "Why I accept (or --reject / --defer)"
 ```
+
+Paid runs require a human-approved plan: `council plan --json` gives a plan
+hash and call/token estimate, a human runs `council approve` for that plan,
+and `council run` must present the matching single-use token
+(`--approved-by NAME --approval-token TOKEN`). Mock runs need no approval.
+The input-token figure uses a character-based approximation, not a hard token
+or currency ceiling. Calls and configured output limits are enforced separately.
+Agents can use `council agent` (JSON) or `council-mcp` (MCP over stdio), but
+not `approve` or `decide`; see [Agent interface](docs/AGENT-INTERFACE.md).
+
+Keys can also come from the macOS Keychain or 1Password instead of the
+environment; `council doctor` shows each key's source, age, and a rotation
+reminder, and `council doctor --check-keys` validates keys with one free
+models-list call per provider. See [Keys](docs/KEYS.md).
 
 `doctor` checks local storage and credential presence; it does not prove that
 the configured account can currently use each pinned model. A successful live
@@ -233,7 +299,7 @@ a publication boundary, not a roadmap or availability claim.
 ## Experimental service boundary
 
 > [!WARNING]
-> The `0.3.1a1` candidate retains the frozen `0.2.0a1` HTTP service profile.
+> The `0.4.0a1` candidate retains the frozen `0.2.0a1` HTTP service profile.
 > It is **mock-only and loopback-only** and cannot construct live-provider
 > adapters. Do not bind it to a non-loopback address, place it behind a tunnel
 > or remote front door, enable either work principal, or use it for production
@@ -259,6 +325,9 @@ reporting for this repository.
 ## Documentation
 
 - [Operations runbook](docs/OPERATIONS.md)
+- [Adding and rotating API keys](docs/KEYS.md)
+- [Agent interface (JSON CLI, MCP server, skill)](docs/AGENT-INTERFACE.md)
+- [Optional separate OS user install](docs/SEPARATE-USER.md)
 - [Security model and vulnerability reporting](docs/SECURITY.md)
 - [Portable mock service and fixed reference topology](docs/PORTABLE-SERVICE.md)
 - [Research grounding and claim boundaries](docs/RESEARCH.md)

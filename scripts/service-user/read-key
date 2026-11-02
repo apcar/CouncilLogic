@@ -1,0 +1,12 @@
+#!/bin/sh
+# Secret resolver for the councillogic service user: prints one key from
+# /var/lib/councillogic/keys/<NAME> (files 0600, directory 0700, owned by the
+# service user). Never logs. Fails closed.
+set -eu
+name="${1:-}"
+case "$name" in
+  ''|*[!A-Z0-9_]*) exit 1 ;;
+esac
+file="/var/lib/councillogic/keys/$name"
+[ -f "$file" ] && [ ! -L "$file" ] || exit 1
+exec cat -- "$file"

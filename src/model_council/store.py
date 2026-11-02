@@ -17,7 +17,9 @@ from urllib.parse import parse_qsl, urlsplit
 from model_council.models import ProviderError, ProviderResponse
 
 
-CURRENT_SCHEMA_VERSION = 1
+CURRENT_SCHEMA_VERSION = 4
+HUMAN_DECISIONS = ("accept", "reject", "defer")
+HUMAN_DECISION_NOTE_MAX_CHARS = 4000
 DEFAULT_DATABASE_NAME = "council.sqlite3"
 _DATABASE_SUFFIXES = {".db", ".sqlite", ".sqlite3"}
 _TERMINAL_RUN_STATUSES = {"succeeded", "completed", "partial", "failed", "cancelled"}
@@ -98,7 +100,8 @@ def _jsonable(value: Any) -> Any:
     if isinstance(value, Path):
         return str(value)
     if dataclasses.is_dataclass(value):
-        return _jsonable(dataclasses.asdict(value))
+        if not isinstance(value, type):
+            return _jsonable(dataclasses.asdict(value))
     if hasattr(value, "to_dict") and callable(value.to_dict):
         return _jsonable(value.to_dict())
     if isinstance(value, dict):
@@ -285,6 +288,31 @@ class CouncilStore:
             if current < 1:
                 self._migration_1(connection)
                 connection.execute("PRAGMA user_version = 1")
+                current = 1
+            if current < 2:
+                self._migration_2(connection)
+                connection.execute("PRAGMA user_version = 2")
+                current = 2
+            if current < 3:
+                self._migration_3(connection)
+                connection.execute("PRAGMA user_version = 3")
+                current = 3
+            if current < 4:
+                connection.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS agent_requests (
+                        request_id TEXT PRIMARY KEY,
+                        payload_sha256 TEXT NOT NULL,
+                        run_id TEXT NOT NULL REFERENCES runs(id),
+                        created_at TEXT NOT NULL
+                    )
+                    """
+                )
+                connection.execute(
+                    "INSERT OR IGNORE INTO schema_version(version, applied_at) VALUES (?, ?)",
+                    (4, _utc_now()),
+                )
+                connection.execute("PRAGMA user_version = 4")
             connection.commit()
         except BaseException:
             connection.rollback()
@@ -380,6 +408,286 @@ class CouncilStore:
             "INSERT OR IGNORE INTO schema_version(version, applied_at) VALUES (?, ?)",
             (1, _utc_now()),
         )
+
+    @staticmethod
+    def _migration_2(connection: sqlite3.Connection) -> None:
+        """Add the append-only human decision ledger."""
+
+        statements = (
+            """
+            CREATE TABLE IF NOT EXISTS human_decisions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                run_id TEXT NOT NULL REFERENCES runs(id),
+                decision TEXT NOT NULL
+                    CHECK (decision IN ('accept', 'reject', 'defer')),
+                note TEXT NOT NULL,
+                aggregate_outcome TEXT,
+                aggregate_winner TEXT,
+                result_sha256 TEXT,
+                previous_record_sha256 TEXT,
+                record_json TEXT NOT NULL,
+                record_sha256 TEXT NOT NULL UNIQUE,
+                decided_at TEXT NOT NULL
+            )
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_human_decisions_run
+            ON human_decisions(run_id, id)
+            """,
+            """
+            CREATE TRIGGER IF NOT EXISTS human_decisions_no_update
+            BEFORE UPDATE ON human_decisions
+            BEGIN
+                SELECT RAISE(ABORT, 'human decisions are append-only');
+            END
+            """,
+            """
+            CREATE TRIGGER IF NOT EXISTS human_decisions_no_delete
+            BEFORE DELETE ON human_decisions
+            BEGIN
+                SELECT RAISE(ABORT, 'human decisions are append-only');
+            END
+            """,
+        )
+        for statement in statements:
+            connection.execute(statement)
+        connection.execute(
+            "INSERT OR IGNORE INTO schema_version(version, applied_at) VALUES (?, ?)",
+            (2, _utc_now()),
+        )
+
+    @staticmethod
+    def _migration_3(connection: sqlite3.Connection) -> None:
+        """Add single-use human approvals for paid runs."""
+
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS run_approvals (
+                token_sha256 TEXT PRIMARY KEY,
+                plan_hash TEXT NOT NULL,
+                approved_by TEXT NOT NULL,
+                max_calls INTEGER NOT NULL,
+                approved_at TEXT NOT NULL,
+                consumed_at TEXT,
+                run_id TEXT
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TRIGGER IF NOT EXISTS run_approvals_no_delete
+            BEFORE DELETE ON run_approvals
+            BEGIN
+                SELECT RAISE(ABORT, 'run approvals are append-only');
+            END
+            """
+        )
+        connection.execute(
+            "INSERT OR IGNORE INTO schema_version(version, applied_at) VALUES (?, ?)",
+            (3, _utc_now()),
+        )
+
+    def get_agent_request(self, request_id: str) -> dict[str, Any] | None:
+        with self.connection() as connection:
+            row = connection.execute(
+                "SELECT * FROM agent_requests WHERE request_id = ?", (request_id,)
+            ).fetchone()
+        return None if row is None else dict(row)
+
+    def bind_agent_request(
+        self, request_id: str, payload_sha256: str, run_id: str
+    ) -> None:
+        with self._write_transaction() as connection:
+            connection.execute(
+                """
+                INSERT INTO agent_requests (request_id, payload_sha256, run_id, created_at)
+                VALUES (?, ?, ?, ?)
+                """,
+                (request_id, payload_sha256, run_id, _utc_now()),
+            )
+
+    def invocation_progress(self, run_id: str) -> dict[str, int]:
+        with self.connection() as connection:
+            rows = connection.execute(
+                "SELECT status, COUNT(*) AS n FROM invocations WHERE run_id = ? GROUP BY status",
+                (run_id,),
+            ).fetchall()
+        counts = {str(row["status"]): int(row["n"]) for row in rows}
+        return {
+            "running": counts.get("running", 0),
+            "succeeded": counts.get("succeeded", 0),
+            "failed": counts.get("failed", 0),
+        }
+
+    def record_run_approval(
+        self, token_sha256: str, plan_hash: str, approved_by: str, max_calls: int
+    ) -> None:
+        with self._write_transaction() as connection:
+            connection.execute(
+                """
+                INSERT INTO run_approvals (
+                    token_sha256, plan_hash, approved_by, max_calls, approved_at
+                ) VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(token_sha256) DO NOTHING
+                """,
+                (token_sha256, plan_hash, approved_by, max_calls, _utc_now()),
+            )
+
+    def consume_run_approval(self, token_sha256: str, plan_hash: str) -> dict[str, Any]:
+        """Mark an approval used; raise PermissionError if unknown or used."""
+
+        with self._write_transaction() as connection:
+            row = connection.execute(
+                "SELECT * FROM run_approvals WHERE token_sha256 = ?",
+                (token_sha256,),
+            ).fetchone()
+            if row is None or row["plan_hash"] != plan_hash:
+                raise PermissionError(
+                    "Paid run refused: no recorded human approval for this plan"
+                )
+            if row["consumed_at"] is not None:
+                raise PermissionError(
+                    "Paid run refused: approval token was already used "
+                    f"(run {row['run_id'] or 'unknown'}); approve a new plan"
+                )
+            consumed_at = _utc_now()
+            connection.execute(
+                "UPDATE run_approvals SET consumed_at = ? WHERE token_sha256 = ?",
+                (consumed_at, token_sha256),
+            )
+        return {
+            "approved_by": row["approved_by"],
+            "plan_hash": row["plan_hash"],
+            "max_calls": row["max_calls"],
+            "approved_at": row["approved_at"],
+            "consumed_at": consumed_at,
+        }
+
+    def run_approval_for(self, run_id: str) -> dict[str, Any] | None:
+        """Return the consumed human approval attached to a run, if any."""
+
+        with self.connection() as connection:
+            row = connection.execute(
+                "SELECT * FROM run_approvals WHERE run_id = ? "
+                "AND consumed_at IS NOT NULL ORDER BY approved_at LIMIT 1",
+                (run_id,),
+            ).fetchone()
+        return None if row is None else dict(row)
+
+    def attach_run_approval(self, token_sha256: str, run_id: str) -> None:
+        with self._write_transaction() as connection:
+            connection.execute(
+                "UPDATE run_approvals SET run_id = ? WHERE token_sha256 = ? AND run_id IS NULL",
+                (run_id, token_sha256),
+            )
+
+    def record_human_decision(
+        self, run_id: str, decision: str, note: str
+    ) -> dict[str, Any]:
+        """Append one permanent human decision for a finished run.
+
+        Records are never updated or deleted (SQLite triggers enforce this).
+        A later decision supersedes an earlier one only by being appended
+        after it; each record hashes the previous record to form a chain.
+        """
+
+        if decision not in HUMAN_DECISIONS:
+            raise ValueError(
+                "decision must be one of: " + ", ".join(HUMAN_DECISIONS)
+            )
+        if not isinstance(note, str):
+            raise ValueError("decision note must be text")
+        note = note.strip()
+        if len(note) > HUMAN_DECISION_NOTE_MAX_CHARS:
+            raise ValueError(
+                "decision note must be at most "
+                f"{HUMAN_DECISION_NOTE_MAX_CHARS} characters"
+            )
+        _assert_no_credentials({"note": note}, "$.decision")
+        with self._write_transaction() as connection:
+            row = connection.execute(
+                "SELECT status, result_json FROM runs WHERE id = ?", (run_id,)
+            ).fetchone()
+            if row is None:
+                raise KeyError(f"unknown run: {run_id}")
+            result = _decode_json(row["result_json"], None)
+            if not result:
+                raise ValueError(
+                    "run has no result yet; resume or wait before deciding"
+                )
+            aggregate = result.get("aggregate") or {}
+            previous = connection.execute(
+                """
+                SELECT record_sha256 FROM human_decisions
+                WHERE run_id = ? ORDER BY id DESC LIMIT 1
+                """,
+                (run_id,),
+            ).fetchone()
+            record = {
+                "run_id": run_id,
+                "decision": decision,
+                "note": note,
+                "run_status": row["status"],
+                "completion_quality": result.get("completion_quality"),
+                "aggregate_outcome": aggregate.get("outcome"),
+                "aggregate_winner": aggregate.get("winner"),
+                "result_sha256": _sha256_text(_canonical_json(result)),
+                "previous_record_sha256": (
+                    None if previous is None else previous["record_sha256"]
+                ),
+                "decided_at": _utc_now(),
+            }
+            record_json = _canonical_json(record)
+            record_sha256 = _sha256_text(record_json)
+            cursor = connection.execute(
+                """
+                INSERT INTO human_decisions (
+                    run_id, decision, note, aggregate_outcome,
+                    aggregate_winner, result_sha256, previous_record_sha256,
+                    record_json, record_sha256, decided_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    run_id,
+                    decision,
+                    note,
+                    record["aggregate_outcome"],
+                    record["aggregate_winner"],
+                    record["result_sha256"],
+                    record["previous_record_sha256"],
+                    record_json,
+                    record_sha256,
+                    record["decided_at"],
+                ),
+            )
+        return {
+            "id": int(cursor.lastrowid or 0),
+            **record,
+            "record_sha256": record_sha256,
+        }
+
+    def list_human_decisions(self, run_id: str) -> list[dict[str, Any]]:
+        """Return every human decision for a run, oldest first."""
+
+        with self.connection() as connection:
+            rows = connection.execute(
+                "SELECT * FROM human_decisions WHERE run_id = ? ORDER BY id",
+                (run_id,),
+            ).fetchall()
+        decisions = []
+        for row in rows:
+            record = _decode_json(row["record_json"], {})
+            decisions.append(
+                {
+                    "id": row["id"],
+                    **record,
+                    "record_sha256": row["record_sha256"],
+                    "hash_verified": (
+                        _sha256_text(row["record_json"]) == row["record_sha256"]
+                    ),
+                }
+            )
+        return decisions
 
     def create_run(
         self,
@@ -632,7 +940,7 @@ class CouncilStore:
                     _utc_now(),
                 ),
             )
-        return int(cursor.lastrowid)
+        return int(cursor.lastrowid or 0)
 
     def list_events(self, run_id: str) -> list[dict[str, Any]]:
         with self.connection() as connection:
@@ -930,7 +1238,7 @@ class CouncilStore:
             retry_event_id: int | None = None
             retry_kind: str | None = None
             prior_failure: dict[str, Any] | None = None
-            restored_call_count = 0
+            restored_call_count: Any = 0
             if prior_invocation is None:
                 if attempted_call_count != 1:
                     raise RuntimeError(

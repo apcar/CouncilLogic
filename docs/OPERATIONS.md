@@ -707,11 +707,14 @@ old-run resume. Treat them as release changes, not live edits.
 `1.2.0-beta` introduced the 1,000-character jury rationale bound and optional
 jury repair. `1.2.1-beta` clarified that requested deliverable counts do not
 determine proposal array lengths. `1.2.2-beta` adds narrower provider-generation
-targets while retaining the larger canonical local proposal bounds. Protocol
+targets while retaining the larger canonical local proposal bounds.
+`1.3.0-beta` wraps untrusted data in random per-run delimiters, asks the
+synthesizer to name the aggregate outcome first, and checks that Outcome
+against the deterministic aggregate (a mismatch marks the run degraded). Protocol
 changes apply only to newly created runs and do not revalidate, repair, or
 recompute earlier records. Preserve the matching older installation for
 unfinished earlier runs, export important completed records before rollout,
-and use a fresh idempotency key for a new `1.2.2-beta` run.
+and use a fresh idempotency key for a new `1.3.0-beta` run.
 
 ## Retention and deletion
 

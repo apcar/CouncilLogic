@@ -1,0 +1,239 @@
+{
+  "$id": "https://github.com/apcar/CouncilLogic/docs/agent-schema/v1/request.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "One request to `council agent` or the arguments of a council-mcp tool (MCP supplies action from the tool name). decide and approve are human-only and are not valid actions.",
+  "oneOf": [
+    {
+      "additionalProperties": false,
+      "properties": {
+        "action": {
+          "const": "capabilities"
+        },
+        "schema_version": {
+          "const": "1"
+        }
+      },
+      "required": [
+        "action"
+      ],
+      "title": "capabilities",
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "action": {
+          "const": "plan"
+        },
+        "call_timeout_seconds": {
+          "exclusiveMinimum": 0,
+          "type": "number"
+        },
+        "deadline_seconds": {
+          "exclusiveMinimum": 0,
+          "type": "number"
+        },
+        "providers": {
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1,
+          "type": "array"
+        },
+        "question": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "schema_version": {
+          "const": "1"
+        },
+        "synthesis_providers": {
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1,
+          "type": "array"
+        }
+      },
+      "required": [
+        "action",
+        "question"
+      ],
+      "title": "plan",
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "action": {
+          "const": "run"
+        },
+        "approval_token": {
+          "pattern": "^cla1\\.[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "approved_by": {
+          "maxLength": 120,
+          "minLength": 1,
+          "type": "string"
+        },
+        "call_timeout_seconds": {
+          "exclusiveMinimum": 0,
+          "type": "number"
+        },
+        "deadline_seconds": {
+          "exclusiveMinimum": 0,
+          "type": "number"
+        },
+        "providers": {
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1,
+          "type": "array"
+        },
+        "question": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "request_id": {
+          "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": "1"
+        },
+        "synthesis_providers": {
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1,
+          "type": "array"
+        }
+      },
+      "required": [
+        "action",
+        "question"
+      ],
+      "title": "run",
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "action": {
+          "const": "start"
+        },
+        "approval_token": {
+          "pattern": "^cla1\\.[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "approved_by": {
+          "maxLength": 120,
+          "minLength": 1,
+          "type": "string"
+        },
+        "call_timeout_seconds": {
+          "exclusiveMinimum": 0,
+          "type": "number"
+        },
+        "deadline_seconds": {
+          "exclusiveMinimum": 0,
+          "type": "number"
+        },
+        "providers": {
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1,
+          "type": "array"
+        },
+        "question": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "request_id": {
+          "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": "1"
+        },
+        "synthesis_providers": {
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1,
+          "type": "array"
+        }
+      },
+      "required": [
+        "action",
+        "question"
+      ],
+      "title": "start",
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "action": {
+          "const": "status"
+        },
+        "run_id": {
+          "type": "string"
+        },
+        "schema_version": {
+          "const": "1"
+        }
+      },
+      "required": [
+        "action",
+        "run_id"
+      ],
+      "title": "status",
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "action": {
+          "const": "inspect"
+        },
+        "run_id": {
+          "type": "string"
+        },
+        "schema_version": {
+          "const": "1"
+        }
+      },
+      "required": [
+        "action",
+        "run_id"
+      ],
+      "title": "inspect",
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "action": {
+          "const": "list"
+        },
+        "limit": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "schema_version": {
+          "const": "1"
+        }
+      },
+      "required": [
+        "action"
+      ],
+      "title": "list",
+      "type": "object"
+    }
+  ],
+  "title": "CouncilLogic agent request, schema_version 1"
+}

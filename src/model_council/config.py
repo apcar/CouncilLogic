@@ -4,7 +4,7 @@ import math
 import os
 import re
 import tomllib
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -90,6 +90,40 @@ ALLOWED_ENDPOINT_HOSTS = {
     "upstage": {"api.upstage.ai"},
     "mock": {"localhost", "127.0.0.1"},
 }
+for _hosts_name in list(ALLOWED_ENDPOINT_HOSTS):
+    if _hosts_name != "mock":
+        ALLOWED_ENDPOINT_HOSTS[_hosts_name] = (
+            ALLOWED_ENDPOINT_HOSTS[_hosts_name] | {"openrouter.ai"}
+        )
+
+OPENROUTER_ENDPOINT = "https://openrouter.ai/api/v1/chat/completions"
+OPENROUTER_SECRET = "OPENROUTER_API_KEY"
+# OpenRouter model ids for each heterogeneous seat. Lineages are unchanged, so
+# routing through one key keeps the same seven independent model families.
+# Verified against the public list on 2026-11-01. Verify ids at https://openrouter.ai/models and override per seat with
+# ``openrouter_model`` when a newer release is listed.
+DEFAULT_OPENROUTER_MODELS = {
+    "openai": "openai/gpt-5.6-sol",
+    "anthropic": "anthropic/claude-sonnet-5.5",
+    "gemini": "google/gemini-3.8-flash",
+    "mistral": "mistralai/mistral-medium-3-5",
+    "xai": "x-ai/grok-4.7",
+    "qwen": "qwen/qwen3.8-max-0902",
+    "cohere": "cohere/command-a-plus",
+    "upstage": "upstage/solar-pro4",
+}
+# Live 7-seat trial (2026-11-01): reasoning models spent most of the bounded
+# jury budget on hidden reasoning (Cohere 2,320 of 2,821 tokens) and hit
+# finish_reason=length. Bound reasoning per seat via OpenRouter's unified
+# ``reasoning`` parameter to leave more room for visible output. Truncation
+# can still require bounded recovery.
+DEFAULT_OPENROUTER_EXTRA: dict[str, dict[str, Any]] = {
+    "cohere": {"reasoning": {"max_tokens": 800}},
+    "qwen": {"reasoning": {"max_tokens": 800}},
+    "xai": {"reasoning": {"effort": "low"}},
+    "gemini": {"reasoning": {"effort": "low"}},
+}
+ROUTES = ("direct", "openrouter")
 
 DEFAULT_LIVE_PROVIDER_NAMES = (
     "openai",
@@ -178,12 +212,158 @@ def _default_provider(name: str) -> ProviderConfig:
     )
 
 
+# OpenRouter model ids are "<vendor>/<model>"; the vendor prefix identifies
+# the model family, which must match the seat's declared lineage.
+OPENROUTER_PREFIX_LINEAGES = {
+    "openai": "openai-gpt",
+    "anthropic": "anthropic-claude",
+    "google": "google-gemini",
+    "mistralai": "mistral",
+    "x-ai": "xai-grok",
+    "qwen": "alibaba-qwen",
+    "cohere": "cohere-command",
+    "upstage": "upstage-solar",
+}
+
+
+# Direct provider seat -> the OpenRouter vendor prefix for the same models.
+DIRECT_PROVIDER_PREFIXES = {
+    "openai": "openai",
+    "anthropic": "anthropic",
+    "gemini": "google",
+    "mistral": "mistralai",
+    "xai": "x-ai",
+    "qwen": "qwen",
+    "cohere": "cohere",
+    "upstage": "upstage",
+}
+
+
+def model_identity(provider: ProviderConfig) -> str:
+    """Route-independent model identity used for duplicate detection.
+
+    Direct ``gpt-5.6-sol`` and OpenRouter ``openai/gpt-5.6-sol`` normalize to
+    the same vendor-qualified identity, compared case-insensitively. Preserve
+    the namespace: different vendors can use the same short model name.
+    """
+
+    model = provider.model.strip().lower()
+    if _is_openrouter_endpoint(provider.endpoint):
+        return model
+    prefix = DIRECT_PROVIDER_PREFIXES.get(provider.name, provider.name)
+    if model.startswith(prefix + "/"):
+        model = model[len(prefix) + 1:]
+    if model.startswith("models/"):
+        model = model[len("models/"):]
+    return f"{prefix}/{model}"
+
+
+def _is_openrouter_endpoint(endpoint: str) -> bool:
+    host = (urlparse(endpoint.replace("{model}", "m")).hostname or "").lower()
+    return host == "openrouter.ai" or host.endswith(".openrouter.ai")
+
+
+def lineage_report(
+    providers: tuple[ProviderConfig, ...] | list[ProviderConfig],
+) -> dict[str, Any]:
+    """Verify each seat's lineage against its model identity.
+
+    OpenRouter seats derive their lineage from the model id prefix; a known
+    prefix that disagrees with the declared lineage is a mismatch, an unknown
+    prefix leaves diversity unverified. Two seats sharing one model identity
+    are duplicates. Direct seats are trusted to their configured lineage.
+    """
+
+    mismatches: list[str] = []
+    unverified: list[str] = []
+    seen: dict[str, str] = {}
+    duplicates: list[str] = []
+    lineages: set[str] = set()
+    for provider in providers:
+        lineage = provider.lineage
+        if not provider.name.startswith("mock"):
+            identity = model_identity(provider)
+            if _is_openrouter_endpoint(provider.endpoint):
+                prefix, sep, _rest = provider.model.strip().lower().partition("/")
+                derived = OPENROUTER_PREFIX_LINEAGES.get(prefix) if sep else None
+                if derived is None:
+                    unverified.append(provider.name)
+                elif derived != provider.lineage:
+                    mismatches.append(
+                        f"{provider.name}: model {provider.model} is "
+                        f"{derived}, not declared {provider.lineage}"
+                    )
+                    lineage = derived
+            if identity in seen:
+                duplicates.append(
+                    f"{provider.name} and {seen[identity]} both use {provider.model}"
+                )
+            else:
+                seen[identity] = provider.name
+        lineages.add(lineage)
+    status = "verified"
+    if unverified:
+        status = "unverified"
+    if mismatches or duplicates:
+        status = "invalid"
+    return {
+        "status": status,
+        "lineage_count": len(lineages),
+        "unverified_providers": unverified,
+        "mismatches": mismatches,
+        "duplicate_models": duplicates,
+    }
+
+
+def default_route() -> str:
+    route = os.environ.get("MODEL_COUNCIL_ROUTE", "direct").strip().lower()
+    if route not in ROUTES:
+        raise ValueError("MODEL_COUNCIL_ROUTE must be 'direct' or 'openrouter'")
+    return route
+
+
+def route_via_openrouter(
+    config: ProviderConfig, *, model: str | None = None
+) -> ProviderConfig:
+    """Return the same seat (name, lineage, budgets) sent through OpenRouter."""
+
+    if config.name.startswith("mock"):
+        return config
+    env_model = os.environ.get(
+        f"MODEL_COUNCIL_{config.name.upper()}_OPENROUTER_MODEL"
+    )
+    routed_model = (
+        model
+        or env_model
+        or DEFAULT_OPENROUTER_MODELS.get(config.name)
+        or config.model
+    )
+    # Direct-API tuning keys (thinking_level, enable_thinking, ...) do not apply
+    # to OpenRouter's chat schema; keep only the portable sampling option.
+    extra = {
+        key: value
+        for key, value in config.extra.items()
+        if key in {"temperature", "reasoning", "provider"}
+    }
+    extra = {**DEFAULT_OPENROUTER_EXTRA.get(config.name, {}), **extra}
+    return replace(
+        config,
+        model=routed_model,
+        secret_name=OPENROUTER_SECRET,
+        endpoint=OPENROUTER_ENDPOINT,
+        extra=extra,
+    )
+
+
 def default_config() -> AppConfig:
+    route = default_route()
+    providers = tuple(
+        _default_provider(name) for name in DEFAULT_LIVE_PROVIDER_NAMES
+    )
+    if route == "openrouter":
+        providers = tuple(route_via_openrouter(p) for p in providers)
     return AppConfig(
-        providers=tuple(
-            _default_provider(name)
-            for name in DEFAULT_LIVE_PROVIDER_NAMES
-        ),
+        providers=providers,
         # Seven participants plus three ordered synthesis attempts reserve
         # 17 calls, leaving three application-level recovery calls.
         policy=RunPolicy(max_calls=20, jury_repair_attempts=1),
@@ -290,7 +470,18 @@ def validate_run_policy(
         raise ValueError("Proposal quorum exceeds enabled provider count")
     if policy.jury_quorum > len(providers):
         raise ValueError("Jury quorum exceeds enabled provider count")
-    lineage_count = len({provider.lineage for provider in providers})
+    diversity = lineage_report(providers)
+    if diversity["mismatches"]:
+        raise ValueError(
+            "OpenRouter model does not match seat lineage: "
+            + "; ".join(diversity["mismatches"])
+        )
+    if diversity["duplicate_models"]:
+        raise ValueError(
+            "Duplicate model identity across seats: "
+            + "; ".join(diversity["duplicate_models"])
+        )
+    lineage_count = diversity["lineage_count"]
     if policy.min_lineages > lineage_count:
         raise ValueError("Configured providers do not meet minimum lineage diversity")
     if synthesis_provider_count < 1:
@@ -348,6 +539,12 @@ def load_config(path: str | Path | None = None) -> AppConfig:
     policy_raw = dict(raw.get("policy") or {})
     provider_raw = dict(raw.get("providers") or {})
 
+    run_route = str(
+        run_raw.get("route", os.environ.get("MODEL_COUNCIL_ROUTE", "direct"))
+    ).strip().lower()
+    if run_route not in ROUTES:
+        raise ValueError("run.route must be 'direct' or 'openrouter'")
+
     providers: list[ProviderConfig] = []
     defaults = {
         name: _default_provider(name)
@@ -399,6 +596,30 @@ def load_config(path: str | Path | None = None) -> AppConfig:
                 **dict(override.get("extra") or {}),
             },
         )
+        seat_route = str(override.get("route", run_route)).strip().lower()
+        if seat_route not in ROUTES:
+            raise ValueError(
+                f"{name}: route must be 'direct' or 'openrouter'"
+            )
+        if seat_route == "openrouter":
+            routed = route_via_openrouter(
+                provider,
+                model=(
+                    str(override["openrouter_model"])
+                    if "openrouter_model" in override
+                    else None
+                ),
+            )
+            provider = replace(
+                routed,
+                secret_name=str(
+                    override.get("openrouter_secret_name", OPENROUTER_SECRET)
+                ),
+                extra={
+                    **routed.extra,
+                    **dict(override.get("openrouter_extra") or {}),
+                },
+            )
         if provider.enabled:
             validate_provider_config(provider)
             providers.append(provider)

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import sys
 import tempfile
@@ -19,9 +20,15 @@ from .config import (
 )
 from .engine import CouncilEngine
 from .models import ProviderConfig, RunPolicy
-from .providers.factory import create_provider
+from .providers.factory import create_provider, is_openrouter
 from .run_lock import ServiceLock
-from .secrets import SecretResolver, default_secret_resolver
+from .keys import (
+    KEY_MANAGEMENT_URLS,
+    check_key,
+    provider_kind,
+    rotation_status,
+)
+from .secrets import SecretResolver, default_secret_resolver, key_rotated_at
 from .store import CouncilStore, service_managed_data_dir
 from .version import PACKAGE_VERSION
 from .workload import estimate_workload, require_workload_within_limits
@@ -67,7 +74,16 @@ def _add_run_selection_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--min-lineages", type=int)
     parser.add_argument("--max-calls", type=int)
     parser.add_argument("--max-parallel-calls", type=int)
-    parser.add_argument("--deadline-seconds", type=float)
+    parser.add_argument(
+        "--deadline-seconds",
+        type=float,
+        help="Overall run deadline; work still pending is recorded as partial",
+    )
+    parser.add_argument(
+        "--call-timeout-seconds",
+        type=float,
+        help="Cap every provider call's timeout (all stages) at this value",
+    )
     parser.add_argument("--max-question-chars", type=int)
     parser.add_argument("--max-stage-prompt-chars", type=int)
     parser.add_argument("--jury-repair-attempts", type=int)
@@ -103,6 +119,14 @@ def _parser() -> argparse.ArgumentParser:
     doctor.add_argument(
         "--json", action="store_true", help="Print machine-readable output"
     )
+    doctor.add_argument(
+        "--check-keys",
+        action="store_true",
+        help=(
+            "Validate each key with one free models-list request per "
+            "provider (makes network calls; off by default)"
+        ),
+    )
 
     providers = subparsers.add_parser(
         "providers", help="Show locked provider, model, and lineage configuration"
@@ -122,6 +146,45 @@ def _parser() -> argparse.ArgumentParser:
     _add_run_selection_arguments(run)
     run.add_argument("--idempotency-key")
     run.add_argument("--json", action="store_true")
+    run.add_argument(
+        "--approved-by",
+        help="Name of the human who approved this paid run's plan",
+    )
+    run.add_argument(
+        "--approval-token",
+        help="Token from `council approve` for this exact plan (paid runs)",
+    )
+
+    approve = subparsers.add_parser(
+        "approve",
+        help="HUMAN ONLY: approve the cost of one paid run plan (interactive)",
+        description=(
+            "Recompute the plan for this question and provider selection, "
+            "show its estimate, and after you retype the plan hash prefix, "
+            "issue a single-use token bound to that plan hash, estimate and "
+            "approver. Requires an interactive terminal. Not available to "
+            "the agent interface."
+        ),
+    )
+    _add_question_arguments(approve)
+    _add_run_selection_arguments(approve)
+    approve.add_argument("--plan-hash", required=True)
+    approve.add_argument("--approved-by", required=True)
+
+    agent = subparsers.add_parser(
+        "agent",
+        help="Agent JSON interface: read one JSON request, print one JSON reply",
+    )
+    agent.add_argument(
+        "--request",
+        default="-",
+        help="Path to a JSON request file, or - for stdin (default)",
+    )
+    agent.add_argument(
+        "--json",
+        action="store_true",
+        help="Accepted for clarity; output is always JSON",
+    )
 
     resume = subparsers.add_parser("resume", help="Resume a partial or failed run")
     resume.add_argument("run_id")
@@ -130,6 +193,32 @@ def _parser() -> argparse.ArgumentParser:
     inspect = subparsers.add_parser("inspect", help="Inspect one persisted run")
     inspect.add_argument("run_id")
     inspect.add_argument("--json", action="store_true")
+
+    decide = subparsers.add_parser(
+        "decide",
+        help="Record the permanent human decision for a finished run",
+        description=(
+            "The council only advises; a human makes the final decision. "
+            "Each decision is appended to a permanent, hash-chained record "
+            "and is never overwritten. A later decision supersedes an "
+            "earlier one without erasing it."
+        ),
+    )
+    decide.add_argument("run_id")
+    choice = decide.add_mutually_exclusive_group(required=True)
+    choice.add_argument(
+        "--accept", dest="decision", action="store_const", const="accept"
+    )
+    choice.add_argument(
+        "--reject", dest="decision", action="store_const", const="reject"
+    )
+    choice.add_argument(
+        "--defer", dest="decision", action="store_const", const="defer"
+    )
+    decide.add_argument(
+        "--note", required=True, help="Reason for the decision (required)"
+    )
+    decide.add_argument("--json", action="store_true")
 
     listing = subparsers.add_parser("list", help="List persisted runs")
     listing.add_argument("--limit", type=int, default=20)
@@ -155,6 +244,27 @@ def _app_config(args: argparse.Namespace) -> AppConfig:
     return config
 
 
+def apply_call_timeout(provider: ProviderConfig, seconds: float) -> ProviderConfig:
+    """Cap one provider's per-call timeout, including per-stage overrides."""
+
+    if (
+        isinstance(seconds, bool)
+        or not isinstance(seconds, (int, float))
+        or not math.isfinite(seconds)
+        or seconds <= 0
+    ):
+        raise ValueError("call_timeout_seconds must be a positive number")
+    seconds = float(seconds)
+    return replace(
+        provider,
+        timeout_seconds=min(provider.timeout_seconds, seconds),
+        stage_timeout_seconds={
+            stage: min(value, seconds)
+            for stage, value in provider.stage_timeout_seconds.items()
+        },
+    )
+
+
 def _select_run_config(
     config: AppConfig, args: argparse.Namespace
 ) -> AppConfig:
@@ -173,6 +283,11 @@ def _select_run_config(
         if unknown:
             raise ValueError(f"Unknown providers: {', '.join(unknown)}")
         providers = [available[name] for name in requested]
+    call_timeout = getattr(args, "call_timeout_seconds", None)
+    if call_timeout is not None:
+        providers = [
+            apply_call_timeout(provider, call_timeout) for provider in providers
+        ]
 
     policy_values = config.policy.to_dict()
     for field in _RUN_POLICY_OVERRIDES:
@@ -304,6 +419,7 @@ def _providers(
     built: dict[str, Any] = {}
     missing: list[str] = []
     for provider_config in config.providers:
+        key: str | None
         if provider_config.name.startswith("mock"):
             key = "mock-only-sentinel"
         else:
@@ -337,8 +453,15 @@ def _engine(
     )
 
 
-def _doctor(config: AppConfig, *, as_json: bool) -> int:
-    resolver = default_secret_resolver()
+def _doctor(
+    config: AppConfig,
+    *,
+    as_json: bool,
+    check_keys: bool = False,
+    resolver: SecretResolver | None = None,
+    transport: Any = None,
+) -> int:
+    resolver = resolver or default_secret_resolver()
     checks: list[dict[str, Any]] = []
     all_ready = True
     try:
@@ -363,21 +486,54 @@ def _doctor(config: AppConfig, *, as_json: bool) -> int:
         )
 
     for provider in config.providers:
+        source: str | None
         if provider.name.startswith("mock"):
             source = "built-in mock"
         else:
             source = resolver.source_for(provider.secret_name)
         ready = source is not None
-        all_ready = all_ready and ready
-        checks.append(
-            {
-                "check": f"provider:{provider.name}",
-                "ready": ready,
-                "model": provider.model,
-                "lineage": provider.lineage,
-                "credential_source": source or "missing",
-            }
+        kind = (
+            "openrouter" if is_openrouter(provider) else provider_kind(provider.name)
         )
+        entry: dict[str, Any] = {
+            "check": f"provider:{provider.name}",
+            "ready": ready,
+            "model": provider.model,
+            "lineage": provider.lineage,
+            "credential_source": source or "missing",
+            "credential": (
+                f"{provider.secret_name} present"
+                if ready
+                else f"{provider.secret_name} missing"
+            ),
+            "route": "openrouter" if kind == "openrouter" else "direct",
+        }
+        if kind != "mock":
+            entry["key_management_url"] = KEY_MANAGEMENT_URLS.get(kind)
+            entry.update(
+                rotation_status(
+                    key_rotated_at(resolver, provider.secret_name)
+                    if ready
+                    else None
+                )
+            )
+            entry["reminder"] = entry["reminder"].replace(
+                "<NAME>", provider.secret_name
+            )
+            if check_keys and ready:
+                key = resolver.resolve(provider.secret_name) or ""
+                kwargs: dict[str, Any] = {"endpoint": provider.endpoint}
+                if transport is not None:
+                    kwargs["transport"] = transport
+                entry["key_check"] = check_key(kind, key, **kwargs)
+                del key
+                if entry["key_check"]["status"] == "invalid":
+                    ready = False
+                    entry["ready"] = False
+            elif check_keys:
+                entry["key_check"] = {"status": "skipped", "detail": "no key"}
+        all_ready = all_ready and ready
+        checks.append(entry)
 
     payload = {
         "ready": all_ready,
@@ -385,7 +541,13 @@ def _doctor(config: AppConfig, *, as_json: bool) -> int:
             provider.name.startswith("mock") for provider in config.providers
         ) else "live",
         "checks": checks,
-        "note": "No network requests were made and no credential values were printed.",
+        "note": (
+            "Key checks made one models-list request per provider; "
+            "no credential values were printed."
+            if check_keys
+            else "No network requests were made and no credential values "
+            "were printed. Use --check-keys to validate keys."
+        ),
     }
     if as_json:
         print(json.dumps(payload, indent=2, sort_keys=True))
@@ -395,6 +557,17 @@ def _doctor(config: AppConfig, *, as_json: bool) -> int:
             marker = "ok" if check["ready"] else "missing"
             detail = check.get("detail") or check.get("credential_source")
             print(f"  [{marker}] {check['check']}: {detail}")
+            if check.get("route") == "openrouter":
+                print(f"      via OpenRouter: {check['credential']}")
+            if "key_check" in check:
+                print(
+                    f"      key check: {check['key_check']['status']} "
+                    f"({check['key_check']['detail']})"
+                )
+            if check.get("reminder"):
+                print(f"      rotation: {check['reminder']}")
+            if check.get("key_management_url"):
+                print(f"      manage keys: {check['key_management_url']}")
         print(payload["note"])
     return 0 if all_ready else 2
 
@@ -442,10 +615,126 @@ def _print_workload_plan(plan: dict[str, Any], *, as_json: bool) -> None:
     )
 
 
-def _print_result(result: dict[str, Any], *, as_json: bool) -> None:
+def _council_verdict_lines(result: dict[str, Any]) -> list[str]:
+    """Lead with the deterministic aggregate: winner, vote split, dissent."""
+
+    aggregate = result.get("aggregate")
+    if not aggregate:
+        return ["Council result: no aggregate (jury stage did not complete)"]
+    mapping = (result.get("candidate_namespace") or {}).get(
+        "candidate_label_mapping"
+    ) or {}
+    labels = {provider: label for label, provider in mapping.items()}
+
+    def name(provider: Any) -> str:
+        label = labels.get(provider)
+        return f"{provider} [{label}]" if label else str(provider)
+
+    outcome = aggregate.get("outcome")
+    if outcome == "winner":
+        headline = f"Council winner: {name(aggregate.get('winner'))}"
+    elif outcome == "tie":
+        tied = ", ".join(
+            name(item) for item in aggregate.get("tied_candidates") or []
+        )
+        headline = f"Council result: TIE between {tied} (no winner)"
+    else:
+        headline = f"Council result: no winner ({outcome})"
+    lines = [headline]
+    wins = aggregate.get("win_counts") or {}
+    points = aggregate.get("borda_points") or {}
+    split = ", ".join(
+        f"{name(label)} {wins.get(label, 0)} first-place / "
+        f"{points.get(label, 0)} pts"
+        for label in aggregate.get("ranking") or []
+    )
+    lines.append(
+        f"Vote split ({aggregate.get('counted_judgments', 0)} counted, "
+        f"{aggregate.get('abstentions', 0)} abstained, "
+        f"{aggregate.get('invalid_judgments', 0)} invalid): {split}"
+    )
+    winner = aggregate.get("winner")
+    dissenters = [
+        f"{jury.get('juror')} -> {jury.get('winner') or 'abstain'}"
+        for jury in result.get("juries") or []
+        if jury.get("valid")
+        and (jury.get("abstain") or jury.get("winner") != winner)
+    ]
+    lines.append(
+        "Dissent: " + ("; ".join(dissenters) if dissenters else "none")
+    )
+    for disagreement in aggregate.get("material_disagreements") or []:
+        lines.append(f"  - {disagreement}")
+    self_votes = result.get("self_votes")
+    if self_votes:
+        excluded = self_votes.get("excluding_self_votes") or {}
+        lines.append(
+            f"Self-votes: {self_votes.get('self_vote_count', 0)}"
+            + (
+                f" ({', '.join(self_votes.get('self_votes') or [])})"
+                if self_votes.get("self_votes")
+                else ""
+            )
+            + "; result excluding self-votes: "
+            + (
+                str(excluded.get("winner"))
+                if excluded.get("winner")
+                else (
+                    "TIE " + ", ".join(excluded.get("tied_candidates") or [])
+                    if excluded.get("tie")
+                    else "no winner"
+                )
+            )
+            + (
+                " (DIFFERS)"
+                if self_votes.get("outcome_changes_without_self_votes")
+                else ""
+            )
+        )
+    check = result.get("synthesis_check")
+    if check and not check.get("consistent"):
+        lines.append(
+            "Synthesis check: MISMATCH - " + str(check.get("reason"))
+            + " (aggregate above is authoritative)"
+        )
+    return lines
+
+
+def _decision_line(
+    run_id: str, decisions: Sequence[dict[str, Any]] | None
+) -> str:
+    if not decisions:
+        return (
+            "Awaiting human decision "
+            f"(council decide {run_id} --accept|--reject|--defer --note TEXT)"
+        )
+    latest = decisions[-1]
+    return (
+        f"Human decision: {latest['decision'].upper()} at "
+        f"{latest['decided_at']} - {latest['note'] or '(no note)'}"
+        + (
+            f" [{len(decisions)} records; earlier ones preserved]"
+            if len(decisions) > 1
+            else ""
+        )
+    )
+
+
+def _print_result(
+    result: dict[str, Any],
+    *,
+    as_json: bool,
+    decisions: Sequence[dict[str, Any]] | None = None,
+) -> None:
     if as_json:
+        # JSON keeps the stored result contract; decisions are reported by
+        # `inspect --json` and `export` under "human_decisions".
         print(json.dumps(result, indent=2, sort_keys=True))
         return
+    for line in _council_verdict_lines(result):
+        print(line)
+    print(_decision_line(result["run_id"], decisions))
+    print()
     print(f"Run: {result['run_id']}")
     print(f"Status: {result['status']}")
     print(
@@ -490,8 +779,14 @@ def _markdown_export(
     run: dict[str, Any],
     invocations: list[dict[str, Any]],
     events: list[dict[str, Any]],
+    decisions: Sequence[dict[str, Any]] | None = None,
 ) -> str:
     result = run.get("result") or {}
+    verdict = (
+        _council_verdict_lines(result)
+        if result
+        else ["Council result: no result yet"]
+    )
     lines = [
         "# CouncilLogic Run",
         "",
@@ -503,6 +798,17 @@ def _markdown_export(
         ),
         f"- Protocol: `{run['protocol_id']}@{run['protocol_version']}`",
         f"- Protocol hash: `{run['protocol_hash']}`",
+        "",
+        "## Council verdict",
+        "",
+        *[f"- {line}" for line in verdict],
+        f"- {_decision_line(run['id'], decisions)}",
+        "",
+        "## Human decisions (append-only)",
+        "",
+        "```json",
+        json.dumps(list(decisions or []), indent=2, sort_keys=True),
+        "```",
         "",
         "## Question",
         "",
@@ -686,24 +992,136 @@ def _write_private_text(path: Path, content: str) -> None:
             temporary_path.unlink()
 
 
+def _agent_command(args: argparse.Namespace) -> int:
+    from .agent import config_for, handle_request, worker_args_for
+
+    try:
+        if args.request == "-":
+            raw = sys.stdin.read()
+        else:
+            raw = Path(args.request).read_text(encoding="utf-8")
+        request = json.loads(raw)
+    except (OSError, ValueError) as exc:
+        reply: dict[str, Any] = {
+            "ok": False,
+            "error": "bad_request",
+            "message": f"could not read JSON request: {exc}",
+        }
+    else:
+        try:
+            base = config_for(args.mock, args.data_dir, args.config)
+        except (OSError, ValueError) as exc:
+            reply = {"ok": False, "error": "bad_config", "message": str(exc)}
+        else:
+            reply = handle_request(
+                request,
+                base,
+                config_path=args.config,
+                worker_args=worker_args_for(args.mock, base.data_dir, args.config),
+            )
+    print(json.dumps(reply, indent=2, sort_keys=True))
+    return 0 if reply.get("ok") else 2
+
+
+def _diversity_lines(report: dict[str, Any]) -> list[str]:
+    status = str(report.get("status", "unverified"))
+    lines = [
+        f"Lineage diversity: {status.upper()} "
+        f"({report.get('lineage_count', 0)} lineages)"
+    ]
+    unverified = report.get("unverified_providers") or []
+    if unverified:
+        lines.append(
+            "WARNING: lineage could not be verified for "
+            + ", ".join(unverified)
+            + " (unknown OpenRouter model prefix); diversity is not proven."
+        )
+    for item in report.get("mismatches") or []:
+        lines.append(f"WARNING: lineage mismatch: {item}")
+    for item in report.get("duplicate_models") or []:
+        lines.append(f"WARNING: duplicate model: {item}")
+    return lines
+
+
+def _approve_command(config: AppConfig, args: argparse.Namespace) -> int:
+    from .approval import issue_token, plan_record
+
+    config = _select_run_config(config, args)
+    record = plan_record(config, _question_from_args(args))
+    if not record["approval_required"]:
+        print("council: mock/offline runs need no approval", file=sys.stderr)
+        return 2
+    if record["plan_hash"] != args.plan_hash.strip():
+        print(
+            "council: plan hash does not match this question and selection; "
+            "re-run `council plan` and approve the plan you reviewed",
+            file=sys.stderr,
+        )
+        return 4
+    if not sys.stdin.isatty():
+        print(
+            "council: approve is human-only and needs an interactive terminal",
+            file=sys.stderr,
+        )
+        return 4
+    estimate = record["estimate"]
+    print(f"Plan {record['plan_hash']}")
+    print(
+        "Providers: "
+        + ", ".join(f"{p['name']} ({p['model']})" for p in estimate["providers"])
+    )
+    print(
+        f"Up to {estimate['max_calls']} paid logical calls, approximately "
+        f"{estimate['max_input_tokens_upper_bound']} input tokens and <= "
+        f"{estimate['max_output_tokens_upper_bound']} output tokens."
+    )
+    print(f"Protocol hash: {record['protocol_hash']}")
+    for line in _diversity_lines(record["diversity"]):
+        print(line)
+    sys.stdout.flush()
+    prefix = record["plan_hash"][:12]
+    answer = input(f"Type {prefix} to approve this spend as {args.approved_by}: ")
+    if answer.strip() != prefix:
+        print("council: not approved", file=sys.stderr)
+        return 4
+    token = issue_token(config.data_dir, record, args.approved_by)
+    import hashlib
+
+    _store(config).record_run_approval(
+        hashlib.sha256(token.encode("ascii")).hexdigest(),
+        record["plan_hash"],
+        args.approved_by.strip(),
+        int(estimate["max_calls"]),
+    )
+    print("Approved. Single-use token (bound to this plan, estimate and approver):")
+    print(token)
+    return 0
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     data_lock: ServiceLock | None = None
     try:
         config = _app_config(args)
+        if args.command == "agent":
+            return _agent_command(args)
         if args.command in {
+            "approve",
             "doctor",
             "run",
             "resume",
             "inspect",
             "list",
             "export",
+            "decide",
         }:
             data_lock = ServiceLock(config.data_dir)
             data_lock.acquire()
             _refuse_service_managed_cli(config)
         if args.command == "doctor":
-            return _doctor(config, as_json=args.json)
+            return _doctor(
+                config, as_json=args.json, check_keys=args.check_keys
+            )
         if args.command == "providers":
             payload = [
                 {
@@ -733,7 +1151,39 @@ def main(argv: Sequence[str] | None = None) -> int:
                 config.policy,
                 synthesis_providers=config.synthesis_providers,
             )
+            from .approval import plan_record
+
+            record = plan_record(config, question)
+            if args.json:
+                plan = {
+                    **plan,
+                    "plan_hash": record["plan_hash"],
+                    "estimate": record["estimate"],
+                    "approval_required": record["approval_required"],
+                    "protocol_hash": record["protocol_hash"],
+                    "diversity": record["diversity"],
+                }
             _print_workload_plan(plan, as_json=args.json)
+            if not args.json:
+                estimate = record["estimate"]
+                print(f"Plan hash: {record['plan_hash']}")
+                print(f"Protocol hash: {record['protocol_hash']}")
+                for line in _diversity_lines(record["diversity"]):
+                    print(line)
+                print(
+                    f"Estimate: up to {estimate['max_calls']} calls "
+                    f"(healthy run {estimate['healthy_run_calls']}), "
+                    f"approximately {estimate['max_input_tokens_upper_bound']} input tokens and "
+                    f"<= {estimate['max_output_tokens_upper_bound']} output tokens"
+                )
+                print(
+                    "Approval: "
+                    + (
+                        "REQUIRED before a paid run (human runs `council approve`)"
+                        if record["approval_required"]
+                        else "not required (mock/offline)"
+                    )
+                )
             if not plan["within_limits"]:
                 try:
                     require_workload_within_limits(plan)
@@ -741,16 +1191,37 @@ def main(argv: Sequence[str] | None = None) -> int:
                     print(f"council: {exc}", file=sys.stderr)
                 return 2
             return 0
+        if args.command == "approve":
+            return _approve_command(config, args)
         if args.command == "run":
             config = _select_run_config(config, args)
             question = _question_from_args(args)
-            result = _engine(config).run(
-                question, idempotency_key=args.idempotency_key
-            )
+            from .agent import guarded_run
+
+            try:
+                result, _approval = guarded_run(
+                    config,
+                    question,
+                    approved_by=args.approved_by,
+                    approval_token=args.approval_token,
+                    idempotency_key=args.idempotency_key,
+                )
+            except PermissionError as exc:
+                print(f"council: {exc}", file=sys.stderr)
+                return 4
             _print_result(result, as_json=args.json)
             return 0 if result["status"] == "completed" else 3
         if args.command == "resume":
             config = _locked_resume_config(config, args.run_id)
+            from .approval import is_paid
+
+            if is_paid(config) and _store(config).run_approval_for(args.run_id) is None:
+                print(
+                    "council: Resume refused: this paid run has no recorded "
+                    "human approval. Start a new approved run instead.",
+                    file=sys.stderr,
+                )
+                return 4
             result = _engine(config).resume(args.run_id)
             _print_result(result, as_json=args.json)
             return 0 if result["status"] == "completed" else 3
@@ -760,13 +1231,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             run = store.get_run(args.run_id)
             if run is None:
                 raise KeyError(f"Unknown run: {args.run_id}")
-            payload = {
+            inspect_payload: dict[str, Any] = {
                 "run": run,
                 "invocations": store.list_invocations(args.run_id),
                 "events": store.list_events(args.run_id),
+                "human_decisions": store.list_human_decisions(args.run_id),
             }
             if args.json:
-                print(json.dumps(payload, indent=2, sort_keys=True))
+                print(json.dumps(inspect_payload, indent=2, sort_keys=True))
             else:
                 print(f"Run: {run['id']}")
                 print(f"Status: {run['status']}")
@@ -774,11 +1246,32 @@ def main(argv: Sequence[str] | None = None) -> int:
                     f"Protocol: {run['protocol_id']}@{run['protocol_version']}"
                 )
                 print(
-                    f"Invocations: {len(payload['invocations'])}; "
+                    f"Invocations: {len(inspect_payload['invocations'])}; "
                     f"result: {'present' if run.get('result') else 'not yet present'}"
                 )
                 if run.get("result"):
-                    _print_result(run["result"], as_json=False)
+                    _print_result(
+                        run["result"],
+                        as_json=False,
+                        decisions=store.list_human_decisions(args.run_id),
+                    )
+            return 0
+        if args.command == "decide":
+            record = store.record_human_decision(
+                args.run_id, args.decision, args.note
+            )
+            if args.json:
+                print(json.dumps(record, indent=2, sort_keys=True))
+            else:
+                print(
+                    f"Recorded human decision {record['decision'].upper()} "
+                    f"for run {record['run_id']} (record "
+                    f"{record['record_sha256'][:16]}, decision #{record['id']})."
+                )
+                print(
+                    "This record is permanent; a later decision is appended "
+                    "and does not overwrite it."
+                )
             return 0
         if args.command == "list":
             runs = store.list_runs(limit=args.limit)
@@ -797,6 +1290,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 raise KeyError(f"Unknown run: {args.run_id}")
             invocations = store.list_invocations(args.run_id)
             events = store.list_events(args.run_id)
+            decisions = store.list_human_decisions(args.run_id)
             output_path = Path(args.output).expanduser()
             output_path.parent.mkdir(parents=True, exist_ok=True)
             if args.format == "json":
@@ -805,12 +1299,15 @@ def main(argv: Sequence[str] | None = None) -> int:
                         "run": run,
                         "invocations": invocations,
                         "events": events,
+                        "human_decisions": decisions,
                     },
                     indent=2,
                     sort_keys=True,
                 )
             else:
-                content = _markdown_export(run, invocations, events)
+                content = _markdown_export(
+                    run, invocations, events, decisions
+                )
             _write_private_text(output_path, content + "\n")
             print(output_path)
             return 0

@@ -1,0 +1,3 @@
+#!/bin/sh
+# Agent-side wrapper for MCP clients: point the MCP "command" at this file.
+exec sudo -n -u councillogic /usr/local/libexec/councillogic/agent-entry mcp

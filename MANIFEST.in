@@ -6,6 +6,12 @@ include council.example.toml
 include assets/README.md
 include assets/councillogic-icon.png
 include assets/councillogic-mark.svg
+include docs/AGENT-INTERFACE.md
+include docs/SEPARATE-USER.md
+recursive-include docs/agent-schema *.json
+recursive-include scripts/service-user *
+include docs/KEYS.md
+include docs/skills/councillogic/SKILL.md
 include docs/OPERATIONS.md
 include docs/PORTABLE-SERVICE.md
 include docs/RESEARCH.md
@@ -15,3 +21,4 @@ include docs/adr/0002-agpl-and-commercial-licensing.md
 include docs/assets/councillogic-header.svg
 include examples/mock-governance-proof/README.md
 include scripts/gate1_mock_soak.py
+include docs/releases/0.4.0a1.md

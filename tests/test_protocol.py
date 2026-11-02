@@ -485,10 +485,10 @@ class PromptAndIdentityTests(unittest.TestCase):
 
     def test_protocol_identity_and_stable_hash(self) -> None:
         self.assertEqual(PROTOCOL_ID, "independent-jury")
-        self.assertEqual(PROTOCOL_VERSION, "1.2.2-beta")
+        self.assertEqual(PROTOCOL_VERSION, "1.3.0-beta")
         self.assertEqual(
             protocol_hash(),
-            "f46d419ffe1c26fdc6f2f4fee38fde0c28c28659256762af2fd9c9ae774daaf8",
+            "ae1addfa1b7340820a748b6f8a4b1799173e52cc9ec7c10c59e5aebac1c091f7",
         )
 
 
