@@ -126,8 +126,12 @@ def _load_key(data_dir: Path, *, create: bool) -> bytes | None:
     return key
 
 
-def _mac(key: bytes, plan_hash: str, approved_by: str, max_calls: int) -> str:
+def _mac(
+    key: bytes, plan_hash: str, approved_by: str, max_calls: int, nonce: str = ""
+) -> str:
     message = f"{plan_hash}\n{approved_by}\n{max_calls}".encode("utf-8")
+    if nonce:
+        message += f"\n{nonce}".encode("ascii")
     return hmac.new(key, message, hashlib.sha256).hexdigest()
 
 
@@ -144,8 +148,11 @@ def issue_token(
     key = _load_key(data_dir, create=True)
     assert key is not None
     name = _clean_name(approved_by)
-    return TOKEN_PREFIX + _mac(
-        key, plan["plan_hash"], name, int(plan["estimate"]["max_calls"])
+    # A fresh nonce per approval keeps tokens single-use without making an
+    # identical plan permanently un-approvable after its first run.
+    nonce = secrets.token_hex(8)
+    return TOKEN_PREFIX + nonce + "." + _mac(
+        key, plan["plan_hash"], name, int(plan["estimate"]["max_calls"]), nonce
     )
 
 
@@ -164,8 +171,14 @@ def verify_token(
     key = _load_key(data_dir, create=False)
     if key is None or not token.startswith(TOKEN_PREFIX):
         raise PermissionError("Paid run refused: approval token is not valid here")
-    expected = _mac(key, plan["plan_hash"], name, int(plan["estimate"]["max_calls"]))
-    if not hmac.compare_digest(expected, token[len(TOKEN_PREFIX):]):
+    body = token[len(TOKEN_PREFIX):]
+    nonce, _, mac = body.rpartition(".")
+    if nonce and not (len(nonce) == 16 and all(c in "0123456789abcdef" for c in nonce)):
+        raise PermissionError("Paid run refused: approval token is not valid here")
+    expected = _mac(
+        key, plan["plan_hash"], name, int(plan["estimate"]["max_calls"]), nonce
+    )
+    if not hmac.compare_digest(expected, mac):
         raise PermissionError(
             "Paid run refused: approval token does not match this plan "
             "(question, providers, policy or estimate differ) or approver"

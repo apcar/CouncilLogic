@@ -170,5 +170,20 @@ class DoctorOpenRouterTests(unittest.TestCase):
         self.assertEqual(seat["credential"], "OPENROUTER_API_KEY missing")
 
 
+class ApprovalNonceTests(unittest.TestCase):
+    def test_same_plan_can_be_reapproved_with_distinct_tokens(self) -> None:
+        from model_council.approval import issue_token, verify_token, plan_record
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = replace(default_config(), data_dir=Path(tmp))
+            plan = plan_record(cfg, "Is this a test?")
+            a = issue_token(cfg.data_dir, plan, "Andrew")
+            b = issue_token(cfg.data_dir, plan, "Andrew")
+            self.assertNotEqual(a, b)
+            verify_token(cfg.data_dir, plan, "Andrew", a)
+            verify_token(cfg.data_dir, plan, "Andrew", b)
+            with self.assertRaises(PermissionError):
+                verify_token(cfg.data_dir, plan, "Mallory", a)
+
+
 if __name__ == "__main__":
     unittest.main()
