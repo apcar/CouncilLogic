@@ -3,9 +3,9 @@
 All notable public changes to CouncilLogic are recorded here.
 
 
-## [0.4.0a1] - Unreleased
+## [0.4.0a1] - 2026-11-05
 
-This release prepares human-governed agent execution: a person approves the
+This release adds human-governed agent execution: a person approves the
 paid plan, agents can request bounded council work, and a person records the
 final decision. It includes the local 0.3.1a2 candidate work; that candidate
 was not published as a GitHub release.
