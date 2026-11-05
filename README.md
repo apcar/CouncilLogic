@@ -48,8 +48,7 @@ The fastest review path is to run the
 [security model](docs/SECURITY.md), [operations runbook](docs/OPERATIONS.md),
 and [research boundaries](docs/RESEARCH.md).
 
-This checkout prepares **public alpha (`0.4.0a1`)** for release; publication is
-pending. See the [0.4.0a1 release notes and upgrade guide](docs/releases/0.4.0a1.md).
+This release is **public alpha (`0.4.0a1`)**, dated November 5, 2026. See the [0.4.0a1 release notes and upgrade guide](docs/releases/0.4.0a1.md).
 CouncilLogic remains experimental. Multiple models can share the same
 error. Verify consequential claims against primary sources.
 
